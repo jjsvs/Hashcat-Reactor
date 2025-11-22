@@ -1,0 +1,67 @@
+{
+  "name": "hashcat-reactor",
+  "version": "1.0.0",
+  "description": "Hashcat Reactor GUI",
+  "main": "electron.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+	"electron:dev": "concurrently -k \"cross-env BROWSER=none npm run dev\" \"wait-on http://localhost:3000 && electron .\"",
+	"electron:build": "npm run build && electron-builder",
+	"postinstall": "electron-builder install-app-deps && cd backend && npm install && cd .. && npx electron-rebuild -m backend"
+ },
+  "dependencies": {
+    "lucide-react": "^0.263.1",
+    "node-pty": "^1.1.0-beta39",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "recharts": "^2.7.2",
+    "socket.io-client": "^4.7.2",
+    "xterm": "^5.3.0",
+    "xterm-addon-fit": "^0.8.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.1",
+    "@types/react": "^18.2.15",
+    "@types/react-dom": "^18.2.7",
+    "@vitejs/plugin-react": "^4.0.3",
+    "concurrently": "^8.2.0",
+    "cross-env": "^7.0.3",
+    "electron": "^25.3.0",
+    "electron-builder": "^24.6.3",
+    "typescript": "^5.0.2",
+    "vite": "^4.4.5",
+    "wait-on": "^7.0.1"
+  },
+  "build": {
+    "appId": "com.hashcat.reactor",
+    "productName": "Hashcat Reactor",
+    "asar": true,
+    "asarUnpack": [
+      "**/*.node",
+      "**/node_modules/node-pty/**/*"
+    ],
+    "files": [
+      "dist/**/*",
+      "electron.js",
+      "backend/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "backend",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "directories": {
+      "buildResources": "build"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    }
+  }
+}

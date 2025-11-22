@@ -1,0 +1,17 @@
+[package]
+name = "generic_hash"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hex = "0.4.3"
+sha2 = "0.10.9"
+
+[lib]
+crate-type = ["cdylib"]
+
+[build-dependencies]
+bindgen = "0.72.0"
+
+[profile.release]
+strip = "symbols"
