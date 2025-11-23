@@ -7,7 +7,8 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const os = require('os');
-// NEW: Import node-pty for pseudo-terminal support
+
+// Import node-pty for pseudo-terminal support
 let pty;
 try {
     pty = require('node-pty');
@@ -30,6 +31,7 @@ const uploadDir = IS_ELECTRON && USER_DATA_PATH
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
 const POTFILE_PATH = path.join(uploadDir, 'reactor.potfile');
+const SESSIONS_PATH = path.join(uploadDir, 'sessions.json');
 
 const storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, uploadDir),
@@ -331,6 +333,97 @@ app.post('/api/session/stop', (req, res) => {
     if (potfileWatcher) fs.unwatchFile(POTFILE_PATH);
     res.json({ success: true });
   } else { res.status(400).json({ message: 'No session' }); }
+});
+
+// --- NEW: Check Target against Potfile ---
+app.post('/api/target/check', (req, res) => {
+    const { targetPath, content } = req.body;
+    
+    // 1. Get Target Content
+    let targetContent = '';
+    try {
+        if (content) {
+            targetContent = content;
+        } else if (targetPath && fs.existsSync(targetPath)) {
+            targetContent = fs.readFileSync(targetPath, 'utf-8');
+        } else {
+            return res.status(400).json({ message: 'No valid target found' });
+        }
+    } catch (e) {
+        return res.status(500).json({ message: 'Failed to read target' });
+    }
+
+    // 2. Get Potfile Map
+    const potfileMap = new Map(); // Hash -> Plain
+    if (fs.existsSync(POTFILE_PATH)) {
+        try {
+            const lines = fs.readFileSync(POTFILE_PATH, 'utf-8').split('\n');
+            lines.forEach(line => {
+                const parsed = parsePotfileLine(line);
+                if (parsed) potfileMap.set(parsed.hash, parsed.plain);
+            });
+        } catch (e) {
+            console.error("Error reading potfile for check:", e);
+        }
+    }
+
+    // 3. Compare
+    const found = [];
+    const targetLines = targetContent.split(/\r?\n/).filter(l => l.trim());
+    
+    targetLines.forEach(line => {
+        const hash = line.trim();
+        if (potfileMap.has(hash)) {
+            found.push({ hash: hash, plain: potfileMap.get(hash) });
+        }
+    });
+
+    res.json({ 
+        totalTarget: targetLines.length, 
+        foundCount: found.length, 
+        foundHashes: found 
+    });
+});
+
+// --- ROUTES FOR HISTORY PERSISTENCE ---
+
+// 1. Get History
+app.get('/api/history/sessions', (req, res) => {
+    if (!fs.existsSync(SESSIONS_PATH)) return res.json([]);
+    try {
+        const data = fs.readFileSync(SESSIONS_PATH, 'utf-8');
+        res.json(JSON.parse(data));
+    } catch (e) {
+        console.error("Error reading sessions:", e);
+        res.json([]);
+    }
+});
+
+// 2. Save Session
+app.post('/api/history/sessions', (req, res) => {
+    const newSession = req.body;
+    let sessions = [];
+    
+    if (fs.existsSync(SESSIONS_PATH)) {
+        try {
+            sessions = JSON.parse(fs.readFileSync(SESSIONS_PATH, 'utf-8'));
+        } catch (e) {
+            console.error("Error parsing sessions file, resetting:", e);
+        }
+    }
+    
+    // Add new session to the top of the list
+    sessions.unshift(newSession);
+    
+    // Optional: Limit history to last 100 entries to prevent infinite growth
+    if (sessions.length > 100) sessions = sessions.slice(0, 100);
+
+    try {
+        fs.writeFileSync(SESSIONS_PATH, JSON.stringify(sessions, null, 2));
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ message: 'Failed to save session history' });
+    }
 });
 
 // --- INTERACTIVE TERMINAL & SOCKET SETUP ---
