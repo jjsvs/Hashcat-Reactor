@@ -7,6 +7,8 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const os = require('os');
+const readline = require('readline'); // Added for streaming
+const { Readable } = require('stream'); // Added for streaming input
 
 // Import node-pty for pseudo-terminal support
 let pty;
@@ -335,54 +337,109 @@ app.post('/api/session/stop', (req, res) => {
   } else { res.status(400).json({ message: 'No session' }); }
 });
 
-// --- NEW: Check Target against Potfile ---
-app.post('/api/target/check', (req, res) => {
+// --- UPDATED: Check Target against Potfile (Stream Optimized) ---
+app.post('/api/target/check', async (req, res) => {
     const { targetPath, content } = req.body;
     
-    // 1. Get Target Content
-    let targetContent = '';
-    try {
-        if (content) {
-            targetContent = content;
-        } else if (targetPath && fs.existsSync(targetPath)) {
-            targetContent = fs.readFileSync(targetPath, 'utf-8');
-        } else {
-            return res.status(400).json({ message: 'No valid target found' });
-        }
-    } catch (e) {
-        return res.status(500).json({ message: 'Failed to read target' });
-    }
-
-    // 2. Get Potfile Map
-    const potfileMap = new Map(); // Hash -> Plain
+    // 1. Load Potfile Map (Stream to prevent memory overflow)
+    const potfileMap = new Map(); 
     if (fs.existsSync(POTFILE_PATH)) {
         try {
-            const lines = fs.readFileSync(POTFILE_PATH, 'utf-8').split('\n');
-            lines.forEach(line => {
+            const potStream = fs.createReadStream(POTFILE_PATH);
+            const potRl = readline.createInterface({
+                input: potStream,
+                crlfDelay: Infinity
+            });
+
+            for await (const line of potRl) {
                 const parsed = parsePotfileLine(line);
                 if (parsed) potfileMap.set(parsed.hash, parsed.plain);
-            });
+            }
         } catch (e) {
-            console.error("Error reading potfile for check:", e);
+            console.error("Error reading potfile map:", e);
         }
     }
 
-    // 3. Compare
-    const found = [];
-    const targetLines = targetContent.split(/\r?\n/).filter(l => l.trim());
-    
-    targetLines.forEach(line => {
-        const hash = line.trim();
-        if (potfileMap.has(hash)) {
-            found.push({ hash: hash, plain: potfileMap.get(hash) });
-        }
-    });
+    // 2. Prepare Output
+    const resultFilename = `check_result_${Date.now()}.txt`;
+    const resultPath = path.join(uploadDir, resultFilename);
+    const writeStream = fs.createWriteStream(resultPath);
 
-    res.json({ 
-        totalTarget: targetLines.length, 
-        foundCount: found.length, 
-        foundHashes: found 
-    });
+    const found = [];
+    let foundCount = 0;
+    let totalProcessed = 0;
+
+    // 3. Process Target via Stream (Memory Safe)
+    try {
+        let inputStream;
+
+        if (content) {
+            inputStream = Readable.from(content.split('\n'));
+        } else if (targetPath && fs.existsSync(targetPath)) {
+            inputStream = fs.createReadStream(targetPath);
+        } else {
+             return res.status(400).json({ message: 'No valid target found' });
+        }
+
+        const rl = readline.createInterface({
+            input: inputStream,
+            crlfDelay: Infinity
+        });
+
+        for await (const line of rl) {
+            const hash = line.trim();
+            if (!hash) continue;
+            
+            totalProcessed++;
+
+            if (potfileMap.has(hash)) {
+                const plain = potfileMap.get(hash);
+                const entry = `${hash}:${plain}\n`;
+                
+                // Handle backpressure
+                if (writeStream.write(entry) === false) {
+                    await new Promise(resolve => writeStream.once('drain', resolve));
+                }
+                
+                // Only keep first 100 in RAM for UI
+                if (foundCount < 100) {
+                    found.push({ hash, plain });
+                }
+                foundCount++;
+            }
+        }
+
+        writeStream.end();
+
+        writeStream.on('finish', () => {
+            potfileMap.clear(); // Free memory
+            res.json({ 
+                totalTarget: totalProcessed, 
+                foundCount: foundCount, 
+                preview: found, 
+                downloadToken: resultFilename 
+            });
+        });
+
+    } catch (err) {
+        console.error("Stream processing error:", err);
+        if (!res.headersSent) res.status(500).json({ message: 'Failed to process large file' });
+    }
+});
+
+// --- NEW: Download Route for Large Checks ---
+app.get('/api/download/check-result/:filename', (req, res) => {
+    const filename = req.params.filename;
+    // Simple security: ensure it only allows alphanumeric + dots/underscores
+    if (!/^[a-zA-Z0-9_.]+$/.test(filename)) {
+        return res.status(400).send("Invalid filename");
+    }
+    const filePath = path.join(uploadDir, filename);
+    if (fs.existsSync(filePath)) {
+        res.download(filePath);
+    } else {
+        res.status(404).send("File not found");
+    }
 });
 
 // --- ROUTES FOR HISTORY PERSISTENCE ---
