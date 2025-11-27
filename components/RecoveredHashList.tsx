@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useRef } from 'react'; // Removed useEffect
 import { RecoveredHash } from '../types';
 import { ShieldCheck, Copy, Globe, CheckCircle } from 'lucide-react';
 
@@ -10,12 +10,8 @@ interface Props {
 const RecoveredHashList: React.FC<Props> = ({ hashes, onSendToEscrow }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (scrollRef.current) {
-      const { scrollHeight, clientHeight } = scrollRef.current;
-      scrollRef.current.scrollTo({ top: scrollHeight - clientHeight, behavior: 'smooth' });
-    }
-  }, [hashes]);
+  // DELETED: The useEffect that forced scrolling to the bottom is removed.
+  // The list naturally renders new items at the top.
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
