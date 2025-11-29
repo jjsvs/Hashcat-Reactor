@@ -16,16 +16,30 @@ export interface GpuDevice {
   memoryClock: number;
 }
 
+export interface RecoveredHash {
+  id: string;
+  hash: string;
+  plain: string;
+  algorithmId: string;
+  timestamp: number;
+  sentToEscrow?: boolean;
+}
+
 export interface SessionStats {
+  sessionId?: string; 
+  name?: string; 
   status: SessionStatus;
   target: string;
   hashType: string;
+  attackMode?: number;
   progress: number;
   recovered: number;
   total: number;
   hashrate: number;
   estimatedTimeRemaining: string;
   startTime: number;
+  // NEW: Store cracks specific to this session
+  recoveredHashes: RecoveredHash[];
 }
 
 export interface HistoryPoint {
@@ -36,21 +50,22 @@ export interface HistoryPoint {
 
 export interface LogEntry {
   id: string;
+  sessionId?: string; 
   timestamp: Date;
   level: 'INFO' | 'WARN' | 'ERROR' | 'SUCCESS' | 'CMD';
   message: string;
 }
 
-export interface RecoveredHash {
+// Queue Interface
+export interface QueueItem {
   id: string;
-  hash: string;
-  plain: string;
-  algorithmId: string;
-  timestamp: number;
-  sentToEscrow?: boolean;
+  config: HashcatConfig;
+  status: 'PENDING' | 'RUNNING' | 'COMPLETED';
+  addedAt: number;
+  targetSummary: string;
 }
 
-// Hashes.com Interfaces matching official API
+// Hashes.com Interfaces
 export interface EscrowJob {
   id: number;
   createdAt: string;
@@ -64,7 +79,7 @@ export interface EscrowJob {
   pricePerHash: string;
   pricePerHashUsd: string;
   maxCracksNeeded: number;
-  leftList: string; // Relative path e.g. "/unfound/..."
+  leftList: string; 
 }
 
 export interface EscrowAlgo {
@@ -77,13 +92,17 @@ export interface HashcatConfig {
   hashType: string; // -m
   attackMode: number; // -a
   
+  // Hardware & Resources
+  devices: string; // -d (e.g., "1,2")
+  resourcesPath: string; // Path to scan for files
+  
   // Paths
-  targetPath: string; // The file containing hashes to crack
+  targetPath: string; 
   wordlistPath: string;
-  wordlistPath2?: string; // Optional: For Mode 1 (Combination) right side
+  wordlistPath2?: string; 
   rulePath: string;
   mask: string;
-  maskFile: string; // New: mask from file
+  maskFile: string; 
   
   // Flags & Options
   optimizedKernel: boolean; // -O
@@ -94,15 +113,15 @@ export interface HashcatConfig {
   hwmonDisable: boolean; // --hwmon-disable
   
   // Advanced
-  bitmapMax: number; // --bitmap-max
-  backendDisableOpenCL: boolean; // --backend-disable-opencl
-  backendIgnoreCuda: boolean; // --backend-ignore-cuda
-  spinDamp: number; // --spin-damp
-  scryptTmto: number; // --scrypt-tmto
-  segmentSize: number; // --segment-size
-  keepGuessing: boolean; // --keep-guessing
-  selfTestDisable: boolean; // --self-test-disable
-  logfileDisable: boolean; // --logfile-disable
-  force: boolean; // --force
-  skip: number; // -s / --skip
+  bitmapMax: number; 
+  backendDisableOpenCL: boolean; 
+  backendIgnoreCuda: boolean; 
+  spinDamp: number; 
+  scryptTmto: number; 
+  segmentSize: number; 
+  keepGuessing: boolean; 
+  selfTestDisable: boolean; 
+  logfileDisable: boolean; 
+  force: boolean; 
+  skip: number; 
 }

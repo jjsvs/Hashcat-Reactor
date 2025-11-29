@@ -1,20 +1,96 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { HashcatConfig as IConfig } from '../types';
 import { ATTACK_MODES, HASH_TYPES } from '../constants';
-import { Copy, Terminal, Settings, Play, FolderOpen, ChevronDown, ChevronRight, Zap, Layers, Edit3, Lock, Wand2, Loader2 } from 'lucide-react';
+import { Copy, Terminal, Settings, Play, FolderOpen, ChevronDown, ChevronRight, Zap, Layers, Edit3, Lock, Wand2, Loader2, ListPlus, Cpu, HardDrive, RefreshCw, ToggleLeft, ToggleRight } from 'lucide-react';
 
 interface ConfigPanelProps {
   config: IConfig;
   setConfig: (config: IConfig) => void;
   onStart: (customCommand?: string) => void;
+  onQueue: () => void;
 }
 
-const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart }) => {
+interface ResourceFile {
+  name: string;
+  path: string;
+}
+
+interface Resources {
+  wordlists: ResourceFile[];
+  rules: ResourceFile[];
+  masks: ResourceFile[];
+}
+
+const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, onQueue }) => {
   
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [isManualMode, setIsManualMode] = useState(false);
   const [manualCommand, setManualCommand] = useState('');
   const [detecting, setDetecting] = useState(false);
+  
+  // Device Selection State
+  const [availableDevices, setAvailableDevices] = useState<{id: string, name: string, type: string}[]>([]);
+  const [scanningDevices, setScanningDevices] = useState(false);
+
+  // Resource Library State
+  const [resources, setResources] = useState<Resources>({ wordlists: [], rules: [], masks: [] });
+  const [scanningResources, setScanningResources] = useState(false);
+  
+  // Input Modes (File System vs Library Dropdown)
+  const [inputModes, setInputModes] = useState({
+    wordlist: 'file', // 'file' or 'library'
+    wordlist2: 'file',
+    rule: 'file',
+    mask: 'file'
+  });
+
+  const fetchDevices = async () => {
+    setScanningDevices(true);
+    try {
+      const res = await fetch('http://localhost:3001/api/system/devices', { method: 'POST' });
+      const data = await res.json();
+      if (data.devices) setAvailableDevices(data.devices);
+    } catch (e) { console.error("Failed to fetch devices", e); }
+    setScanningDevices(false);
+  };
+
+  useEffect(() => {
+    fetchDevices();
+  }, []);
+
+  const handleScanResources = async () => {
+    if (!config.resourcesPath) return;
+    setScanningResources(true);
+    try {
+      const res = await fetch('http://localhost:3001/api/fs/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dirPath: config.resourcesPath })
+      });
+      const data = await res.json();
+      setResources(data);
+    } catch (e) {
+      console.error("Failed to scan resources", e);
+    }
+    setScanningResources(false);
+  };
+
+  const toggleInputMode = (key: keyof typeof inputModes) => {
+    setInputModes(prev => ({
+      ...prev,
+      [key]: prev[key] === 'file' ? 'library' : 'file'
+    }));
+  };
+
+  const toggleDevice = (id: string) => {
+    let current = config.devices ? config.devices.split(',') : [];
+    if (current.includes(id)) {
+      current = current.filter(d => d !== id);
+    } else {
+      current.push(id);
+    }
+    setConfig({ ...config, devices: current.join(',') });
+  };
 
   const handleAutoDetect = async () => {
     const input = document.createElement('input');
@@ -54,6 +130,10 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart })
     parts.push(`-m ${config.hashType}`);
     parts.push(`-a ${config.attackMode}`);
     parts.push(`-w ${config.workloadProfile}`);
+    
+    // Devices Flag
+    if (config.devices) parts.push(`-d ${config.devices}`);
+
     if (config.optimizedKernel) parts.push('-O');
     if (config.remove) parts.push('--remove');
     if (config.potfileDisable) parts.push('--potfile-disable');
@@ -79,36 +159,28 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart })
     const mode = config.attackMode;
     const dict = config.wordlistPath || '[wordlist_path]';
     
-    // UPDATE: Removed fallback '?a?a?a?a?a?a?a' to allow Hashcat default behavior
     const mask = config.maskFile || config.mask; 
 
     // Logic Block for Attack Modes
     if (mode === 0) {
-      // Straight
       parts.push(dict);
       if (config.rulePath) parts.push('-r', config.rulePath);
     } 
     else if (mode === 1) {
-      // Combination: Left + Right
       parts.push(config.wordlistPath || '[left_list_path]');
       parts.push(config.wordlistPath2 || '[right_list_path]'); 
     }
     else if ([2, 4, 5, 8, 9].includes(mode)) {
-      // Single wordlist modes
       parts.push(dict);
     }
     else if (mode === 3) {
-      // Brute-Force
-      // Only push mask if user provided one, otherwise let hashcat use built-in default
       if (mask) parts.push(mask);
     } 
     else if (mode === 6) {
-      // Hybrid Dict + Mask
       parts.push(dict);
       if (mask) parts.push(mask);
     } 
     else if (mode === 7) {
-      // Hybrid Mask + Dict
       if (mask) parts.push(mask);
       parts.push(dict);
     }
@@ -153,6 +225,27 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart })
     input.click();
   };
 
+  const handleFolderPick = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.setAttribute('webkitdirectory', '');
+    input.setAttribute('directory', '');
+    
+    input.onchange = (e: any) => {
+      const file = e.target.files[0];
+      if (file) {
+        const fullPath = (file as any).path;
+        const dirPath = fullPath.substring(0, fullPath.lastIndexOf((window.navigator.userAgent.includes('Win') ? '\\' : '/')));
+        if (dirPath) {
+          setConfig({ ...config, resourcesPath: dirPath });
+        } else {
+           setConfig({ ...config, resourcesPath: fullPath });
+        }
+      }
+    };
+    input.click();
+  };
+
   // Helpers for UI Rendering
   const showWordlistInput = [0, 1, 2, 4, 5, 6, 7, 8, 9].includes(config.attackMode);
   const showMaskInput = [3, 6, 7].includes(config.attackMode);
@@ -161,11 +254,39 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart })
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-full">
       <div className="lg:col-span-2 space-y-6 overflow-y-auto pr-2 pb-10">
         
-        {/* General & Attack Mode */}
+        {/* 1. GENERAL CONFIGURATION & RESOURCE LIBRARY */}
         <div className="bg-slate-900 border border-slate-800 p-6 rounded-xl shadow-sm">
            <h3 className="text-indigo-400 font-mono text-xs uppercase tracking-wider mb-4 flex items-center gap-2 font-bold">
-             <Settings size={14} /> General Configuration
+             <Settings size={14} /> General & Resources
            </h3>
+           
+           {/* Library Path Section (Merged) */}
+           <div className="bg-slate-950/50 rounded-lg p-4 border border-slate-800 mb-6">
+              <div className="flex items-center justify-between mb-2">
+                 <h4 className="text-xs font-bold text-slate-400 uppercase flex items-center gap-2"><HardDrive size={12}/> Resource Library Path</h4>
+                 <button 
+                    onClick={handleScanResources}
+                    disabled={scanningResources || !config.resourcesPath}
+                    className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
+                  >
+                    {scanningResources ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />}
+                    Scan Library
+                  </button>
+              </div>
+              <div className="flex gap-2">
+                   <input 
+                      type="text" 
+                      value={config.resourcesPath || ''} 
+                      onChange={(e) => setConfig({...config, resourcesPath: e.target.value})}
+                      placeholder="Select folder containing wordlists/rules..."
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-xs focus:border-indigo-500 outline-none"
+                   />
+                   <button onClick={handleFolderPick} className="bg-slate-800 text-slate-400 px-3 rounded-lg hover:bg-slate-700 border border-slate-700 hover:text-white transition-colors">
+                      <FolderOpen size={14} />
+                   </button>
+                </div>
+           </div>
+
            <div className="grid grid-cols-1 gap-6">
              {/* Ident & Attack */}
              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -203,65 +324,139 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart })
 
              {/* Dynamic Resources Inputs based on Attack Mode */}
              <div className="bg-slate-950/50 rounded-lg p-4 border border-slate-800 space-y-4">
-                <h4 className="text-xs font-bold text-slate-400 uppercase mb-2">Attack Resources</h4>
+                <h4 className="text-xs font-bold text-slate-400 uppercase mb-2">Selected Resources</h4>
                 
                 {/* Wordlist Input Logic */}
                 {showWordlistInput && (
                   <>
                     <div>
-                      <label className="block text-xs font-bold text-slate-500 mb-2">
-                        {config.attackMode === 1 ? 'Left Wordlist Path' : 'Wordlist Path'}
-                      </label>
-                      <div className="flex gap-2">
-                        <input 
-                          type="text"
-                          value={config.wordlistPath}
-                          onChange={e => setConfig({...config, wordlistPath: e.target.value})}
-                          placeholder="C:\wordlists\rockyou.txt"
-                          className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-xs focus:border-indigo-500 outline-none"
-                        />
-                        <button onClick={() => handleFilePick('wordlistPath', '.txt')} className="bg-slate-800 text-slate-400 px-3 rounded-lg hover:bg-slate-700 border border-slate-700 hover:text-white transition-colors">
-                          <FolderOpen size={14} />
+                      <div className="flex justify-between items-center mb-2">
+                        <label className="text-xs font-bold text-slate-500">
+                          {config.attackMode === 1 ? 'Left Wordlist' : 'Wordlist'}
+                        </label>
+                        <button 
+                           onClick={() => toggleInputMode('wordlist')} 
+                           className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-white"
+                        >
+                           {inputModes.wordlist === 'library' ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
+                           {inputModes.wordlist === 'library' ? 'Using Library' : 'Using File Path'}
                         </button>
                       </div>
+
+                      {inputModes.wordlist === 'library' ? (
+                          <div className="relative">
+                            <select 
+                                onChange={(e) => setConfig({...config, wordlistPath: e.target.value})}
+                                value={config.wordlistPath}
+                                disabled={resources.wordlists.length === 0}
+                                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 text-xs focus:border-indigo-500 outline-none appearance-none disabled:opacity-50"
+                            >
+                                <option value="">-- Select from Library --</option>
+                                {resources.wordlists.map((f, i) => <option key={i} value={f.path}>{f.name}</option>)}
+                            </select>
+                            <div className="absolute right-3 top-2.5 pointer-events-none text-slate-500"><ChevronDown size={12} /></div>
+                          </div>
+                      ) : (
+                          <div className="flex gap-2">
+                            <input 
+                              type="text"
+                              value={config.wordlistPath}
+                              onChange={e => setConfig({...config, wordlistPath: e.target.value})}
+                              placeholder="Path to wordlist..."
+                              className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-xs focus:border-indigo-500 outline-none"
+                            />
+                            <button onClick={() => handleFilePick('wordlistPath', '.txt')} className="bg-slate-800 text-slate-400 px-3 rounded-lg hover:bg-slate-700 border border-slate-700 hover:text-white transition-colors">
+                              <FolderOpen size={14} />
+                            </button>
+                          </div>
+                      )}
                     </div>
 
                     {/* MODE 1 SPECIFIC: SECOND WORDLIST */}
                     {config.attackMode === 1 && (
                       <div>
-                         <label className="block text-xs font-bold text-slate-500 mb-2">
-                           Right Wordlist Path
-                         </label>
-                         <div className="flex gap-2">
-                           <input 
-                             type="text"
-                             value={config.wordlistPath2 || ''}
-                             onChange={e => setConfig({...config, wordlistPath2: e.target.value})}
-                             placeholder="C:\wordlists\another_list.txt"
-                             className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-xs focus:border-indigo-500 outline-none"
-                           />
-                           <button onClick={() => handleFilePick('wordlistPath2', '.txt')} className="bg-slate-800 text-slate-400 px-3 rounded-lg hover:bg-slate-700 border border-slate-700 hover:text-white transition-colors">
-                             <FolderOpen size={14} />
-                           </button>
+                         <div className="flex justify-between items-center mb-2">
+                            <label className="text-xs font-bold text-slate-500">Right Wordlist</label>
+                            <button 
+                               onClick={() => toggleInputMode('wordlist2')} 
+                               className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-white"
+                            >
+                               {inputModes.wordlist2 === 'library' ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
+                               {inputModes.wordlist2 === 'library' ? 'Using Library' : 'Using File Path'}
+                            </button>
                          </div>
+                         
+                         {inputModes.wordlist2 === 'library' ? (
+                            <div className="relative">
+                                <select 
+                                    onChange={(e) => setConfig({...config, wordlistPath2: e.target.value})}
+                                    value={config.wordlistPath2 || ''}
+                                    disabled={resources.wordlists.length === 0}
+                                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 text-xs focus:border-indigo-500 outline-none appearance-none disabled:opacity-50"
+                                >
+                                    <option value="">-- Select from Library --</option>
+                                    {resources.wordlists.map((f, i) => <option key={i} value={f.path}>{f.name}</option>)}
+                                </select>
+                                <div className="absolute right-3 top-2.5 pointer-events-none text-slate-500"><ChevronDown size={12} /></div>
+                            </div>
+                         ) : (
+                             <div className="flex gap-2">
+                               <input 
+                                 type="text"
+                                 value={config.wordlistPath2 || ''}
+                                 onChange={e => setConfig({...config, wordlistPath2: e.target.value})}
+                                 placeholder="Path to second wordlist..."
+                                 className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-xs focus:border-indigo-500 outline-none"
+                               />
+                               <button onClick={() => handleFilePick('wordlistPath2', '.txt')} className="bg-slate-800 text-slate-400 px-3 rounded-lg hover:bg-slate-700 border border-slate-700 hover:text-white transition-colors">
+                                 <FolderOpen size={14} />
+                               </button>
+                             </div>
+                         )}
                       </div>
                     )}
                     
-                    {/* Rule path is technically specific to mode 0 usually */}
+                    {/* Rule path logic */}
                     {config.attackMode === 0 && (
                       <div>
-                        <label className="block text-xs font-bold text-slate-500 mb-2">Rule Path</label>
-                        <div className="flex gap-2">
-                          <input 
-                            type="text"
-                            value={config.rulePath}
-                            onChange={e => setConfig({...config, rulePath: e.target.value})}
-                            className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-xs focus:border-indigo-500 outline-none"
-                          />
-                          <button onClick={() => handleFilePick('rulePath', '.rule')} className="bg-slate-800 text-slate-400 px-3 rounded-lg hover:bg-slate-700 border border-slate-700 hover:text-white transition-colors">
-                            <FolderOpen size={14} />
-                          </button>
+                        <div className="flex justify-between items-center mb-2">
+                            <label className="text-xs font-bold text-slate-500">Rule File</label>
+                            <button 
+                               onClick={() => toggleInputMode('rule')} 
+                               className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-white"
+                            >
+                               {inputModes.rule === 'library' ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
+                               {inputModes.rule === 'library' ? 'Using Library' : 'Using File Path'}
+                            </button>
                         </div>
+
+                        {inputModes.rule === 'library' ? (
+                            <div className="relative">
+                                <select 
+                                    onChange={(e) => setConfig({...config, rulePath: e.target.value})}
+                                    value={config.rulePath}
+                                    disabled={resources.rules.length === 0}
+                                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 text-xs focus:border-indigo-500 outline-none appearance-none disabled:opacity-50"
+                                >
+                                    <option value="">-- Select from Library --</option>
+                                    {resources.rules.map((f, i) => <option key={i} value={f.path}>{f.name}</option>)}
+                                </select>
+                                <div className="absolute right-3 top-2.5 pointer-events-none text-slate-500"><ChevronDown size={12} /></div>
+                            </div>
+                        ) : (
+                            <div className="flex gap-2">
+                              <input 
+                                type="text"
+                                value={config.rulePath}
+                                onChange={e => setConfig({...config, rulePath: e.target.value})}
+                                placeholder="Path to rule file..."
+                                className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-xs focus:border-indigo-500 outline-none"
+                              />
+                              <button onClick={() => handleFilePick('rulePath', '.rule')} className="bg-slate-800 text-slate-400 px-3 rounded-lg hover:bg-slate-700 border border-slate-700 hover:text-white transition-colors">
+                                <FolderOpen size={14} />
+                              </button>
+                            </div>
+                        )}
                       </div>
                     )}
                   </>
@@ -276,26 +471,52 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart })
                             type="text"
                             value={config.mask}
                             onChange={e => setConfig({...config, mask: e.target.value})}
-                            placeholder="Leave empty for Hashcat default"
+                            placeholder="Leave empty for Hashcat default or if using mask file"
                             className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-sm focus:border-indigo-500 outline-none"
                           />
                       </div>
                        <div>
-                          <label className="block text-xs font-bold text-slate-500 mb-2">Or Mask File (.hcmask)</label>
-                          <div className="flex gap-2">
-                            <input 
-                              type="text"
-                              value={config.maskFile}
-                              onChange={e => setConfig({...config, maskFile: e.target.value})}
-                              className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-xs focus:border-indigo-500 outline-none"
-                            />
+                          <div className="flex justify-between items-center mb-2">
+                            <label className="text-xs font-bold text-slate-500">Or Mask File (.hcmask)</label>
                             <button 
-                              onClick={() => handleFilePick('maskFile', '.hcmask')} 
-                              className="bg-slate-800 text-slate-400 px-3 rounded-lg hover:bg-slate-700 border border-slate-700 hover:text-white transition-colors"
+                               onClick={() => toggleInputMode('mask')} 
+                               className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-white"
                             >
-                              <FolderOpen size={14} />
+                               {inputModes.mask === 'library' ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
+                               {inputModes.mask === 'library' ? 'Using Library' : 'Using File Path'}
                             </button>
                           </div>
+                          
+                          {inputModes.mask === 'library' ? (
+                                <div className="relative">
+                                    <select 
+                                        onChange={(e) => setConfig({...config, maskFile: e.target.value})}
+                                        value={config.maskFile}
+                                        disabled={resources.masks.length === 0}
+                                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 text-xs focus:border-indigo-500 outline-none appearance-none disabled:opacity-50"
+                                    >
+                                        <option value="">-- Select from Library --</option>
+                                        {resources.masks.map((f, i) => <option key={i} value={f.path}>{f.name}</option>)}
+                                    </select>
+                                    <div className="absolute right-3 top-2.5 pointer-events-none text-slate-500"><ChevronDown size={12} /></div>
+                                </div>
+                          ) : (
+                                <div className="flex gap-2">
+                                    <input 
+                                      type="text"
+                                      value={config.maskFile}
+                                      onChange={e => setConfig({...config, maskFile: e.target.value})}
+                                      placeholder="Path to .hcmask file..."
+                                      className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-xs focus:border-indigo-500 outline-none"
+                                    />
+                                    <button 
+                                      onClick={() => handleFilePick('maskFile', '.hcmask')} 
+                                      className="bg-slate-800 text-slate-400 px-3 rounded-lg hover:bg-slate-700 border border-slate-700 hover:text-white transition-colors"
+                                    >
+                                      <FolderOpen size={14} />
+                                    </button>
+                                </div>
+                          )}
                       </div>
                    </div>
                 )}
@@ -303,7 +524,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart })
            </div>
         </div>
 
-        {/* Performance */}
+        {/* 2. PERFORMANCE & FLAGS */}
         <div className="bg-slate-900 border border-slate-800 p-6 rounded-xl shadow-sm">
            <h3 className="text-indigo-400 font-mono text-xs uppercase tracking-wider mb-4 flex items-center gap-2 font-bold">
              <Zap size={14} /> Performance & Flags
@@ -357,7 +578,48 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart })
            </div>
         </div>
 
-        {/* Advanced */}
+        {/* 3. HARDWARE SELECTION */}
+        <div className="bg-slate-900 border border-slate-800 p-6 rounded-xl shadow-sm">
+           <div className="flex items-center justify-between mb-4">
+             <h3 className="text-indigo-400 font-mono text-xs uppercase tracking-wider flex items-center gap-2 font-bold">
+                <Cpu size={14} /> Hardware Selection
+             </h3>
+             <button onClick={fetchDevices} className="text-xs text-slate-500 hover:text-white flex items-center gap-1 transition-colors">
+               {scanningDevices ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} Refresh
+             </button>
+           </div>
+           
+           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {availableDevices.length === 0 ? (
+                <div className="col-span-2 text-center text-xs text-slate-500 py-4 border border-dashed border-slate-800 rounded">
+                   {scanningDevices ? 'Scanning for OpenCL/CUDA devices...' : 'No devices found or scan failed.'}
+                </div>
+              ) : (
+                availableDevices.map(device => {
+                  const isSelected = (config.devices || '').split(',').includes(device.id);
+                  return (
+                    <div 
+                      key={device.id} 
+                      onClick={() => toggleDevice(device.id)}
+                      className={`cursor-pointer p-3 rounded-lg border transition-all flex items-center justify-between ${isSelected ? 'bg-indigo-600/10 border-indigo-500/50' : 'bg-slate-950 border-slate-800 hover:border-slate-600'}`}
+                    >
+                      <div className="flex items-center gap-3">
+                         <div className={`w-4 h-4 rounded border flex items-center justify-center ${isSelected ? 'bg-indigo-600 border-indigo-600' : 'border-slate-600'}`}>
+                           {isSelected && <div className="w-2 h-2 bg-white rounded-sm" />}
+                         </div>
+                         <div>
+                            <div className={`text-xs font-bold ${isSelected ? 'text-indigo-300' : 'text-slate-300'}`}>{device.name}</div>
+                            <div className="text-[10px] text-slate-500">{device.type} ID #{device.id}</div>
+                         </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+           </div>
+        </div>
+
+        {/* 4. ADVANCED OPTIONS */}
         <div className="bg-slate-900 border border-slate-800 rounded-xl shadow-sm overflow-hidden">
           <button 
             onClick={() => setShowAdvanced(!showAdvanced)}
@@ -435,13 +697,24 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart })
              spellCheck={false}
            />
         </div>
-        <div className="bg-slate-900 p-4 border-t border-slate-800 flex gap-3">
-           <button onClick={handleCopy} className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2">
-             <Copy size={16} /> Copy
-           </button>
-           <button onClick={handleRun} className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white py-2.5 rounded-lg text-sm font-medium transition-colors shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-2">
-             <Play size={16} /> {isManualMode ? 'Run Custom' : 'Run Auto'}
-           </button>
+        <div className="bg-slate-900 p-4 border-t border-slate-800 flex flex-col gap-3">
+           <div className="flex gap-3">
+             <button onClick={handleCopy} className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2">
+               <Copy size={16} /> Copy
+             </button>
+             <button onClick={handleRun} className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white py-2.5 rounded-lg text-sm font-medium transition-colors shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-2">
+               <Play size={16} /> {isManualMode ? 'Run Custom' : 'Run Auto'}
+             </button>
+           </div>
+           
+           {!isManualMode && (
+             <button 
+              onClick={onQueue}
+              className="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:text-white text-slate-300 py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
+            >
+               <ListPlus size={16} /> Add to Queue
+             </button>
+           )}
         </div>
       </div>
     </div>

@@ -13,13 +13,18 @@ export const INITIAL_SESSION: SessionStats = {
   total: 0,
   hashrate: 0,
   estimatedTimeRemaining: '--:--:--',
-  startTime: Date.now()
+  startTime: Date.now(),
+  recoveredHashes: [] 
 };
 
 export const DEFAULT_CONFIG: HashcatConfig = {
   hashType: '0',
   attackMode: 0,
-  targetPath: '', // Fixed: Added required targetPath
+  
+  devices: '',
+  resourcesPath: '',
+  
+  targetPath: '', 
   wordlistPath: '',
   rulePath: '',
   mask: '?a?a?a?a?a?a?a',
@@ -27,7 +32,7 @@ export const DEFAULT_CONFIG: HashcatConfig = {
   
   optimizedKernel: true,
   workloadProfile: 3,
-  statusTimer: 30, // Default 30 seconds as requested
+  statusTimer: 30, 
   potfileDisable: false,
   remove: false,
   hwmonDisable: true,

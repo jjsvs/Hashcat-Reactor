@@ -1,4 +1,4 @@
-import React, { useRef } from 'react'; // Removed useEffect
+import React, { useRef } from 'react'; 
 import { RecoveredHash } from '../types';
 import { ShieldCheck, Copy, Globe, CheckCircle } from 'lucide-react';
 
@@ -10,11 +10,25 @@ interface Props {
 const RecoveredHashList: React.FC<Props> = ({ hashes, onSendToEscrow }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // DELETED: The useEffect that forced scrolling to the bottom is removed.
-  // The list naturally renders new items at the top.
-
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
+  };
+
+  // NEW: Helper to decode Hashcat HEX output ($HEX[...]) to readable text
+  const decodePlain = (plain: string) => {
+      if (!plain) return '';
+      const hexMatch = plain.match(/^\$HEX\[([a-fA-F0-9]+)\]$/);
+      if (hexMatch) {
+          try {
+              const hex = hexMatch[1];
+              let str = '';
+              for (let i = 0; i < hex.length; i += 2) {
+                  str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
+              }
+              return str;
+          } catch (e) { return plain; }
+      }
+      return plain;
   };
 
   const newHashes = hashes.filter(h => !h.sentToEscrow);
@@ -57,33 +71,40 @@ const RecoveredHashList: React.FC<Props> = ({ hashes, onSendToEscrow }) => {
             </div>
         ) : (
             <div className="divide-y divide-slate-800/50">
-                {hashes.map((item) => (
-                    <div 
-                      key={item.id} 
-                      className={`p-3 transition-colors flex items-center justify-between group ${
-                        item.sentToEscrow ? 'bg-slate-900/30 hover:bg-slate-900/50' : 'hover:bg-slate-900/50'
-                      }`}
-                    >
-                        <div className="flex items-center gap-3 overflow-hidden">
-                            {item.sentToEscrow && (
-                              <div title="Sent to Escrow">
-                                <CheckCircle size={14} className="text-emerald-500/50" />
-                              </div>
-                            )}
-                            <div className={`flex flex-col gap-0.5 overflow-hidden ${item.sentToEscrow ? 'opacity-50' : ''}`}>
-                                <span className="text-emerald-400 font-mono text-sm font-bold truncate">{item.plain}</span>
-                                <span className="text-slate-500 font-mono text-[10px] truncate">{item.hash}</span>
-                            </div>
-                        </div>
-                        <button 
-                            onClick={() => copyToClipboard(`${item.hash}:${item.plain}`)}
-                            className="p-2 text-slate-500 hover:text-white hover:bg-slate-800 rounded opacity-0 group-hover:opacity-100 transition-all"
-                            title="Copy hash:plain"
+                {hashes.map((item) => {
+                    const readablePlain = decodePlain(item.plain);
+                    return (
+                        <div 
+                          key={item.id} 
+                          className={`p-3 transition-colors flex items-center justify-between group ${
+                            item.sentToEscrow ? 'bg-slate-900/30 hover:bg-slate-900/50' : 'hover:bg-slate-900/50'
+                          }`}
                         >
-                            <Copy size={14} />
-                        </button>
-                    </div>
-                ))}
+                            <div className="flex items-center gap-3 overflow-hidden">
+                                {item.sentToEscrow && (
+                                  <div title="Sent to Escrow">
+                                    <CheckCircle size={14} className="text-emerald-500/50" />
+                                  </div>
+                                )}
+                                <div className={`flex flex-col gap-0.5 overflow-hidden ${item.sentToEscrow ? 'opacity-50' : ''}`}>
+                                    <span className="text-emerald-400 font-mono text-sm font-bold truncate" title={readablePlain}>
+                                        {readablePlain}
+                                    </span>
+                                    <span className="text-slate-500 font-mono text-[10px] truncate" title={item.hash}>
+                                        {item.hash}
+                                    </span>
+                                </div>
+                            </div>
+                            <button 
+                                onClick={() => copyToClipboard(`${item.hash}:${readablePlain}`)}
+                                className="p-2 text-slate-500 hover:text-white hover:bg-slate-800 rounded opacity-0 group-hover:opacity-100 transition-all"
+                                title="Copy hash:plain"
+                            >
+                                <Copy size={14} />
+                            </button>
+                        </div>
+                    );
+                })}
             </div>
         )}
       </div>

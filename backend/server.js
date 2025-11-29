@@ -7,15 +7,15 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const os = require('os');
-const readline = require('readline'); // Added for streaming
-const { Readable } = require('stream'); // Added for streaming input
+const readline = require('readline');
+const { Readable } = require('stream');
 
-// Import node-pty for pseudo-terminal support
+// Import node-pty
 let pty;
 try {
     pty = require('node-pty');
 } catch (e) {
-    console.warn("node-pty not found. Interactive terminal will not work. Run 'npm install node-pty'");
+    console.warn("node-pty not found. Interactive terminal will not work.");
 }
 
 const app = express();
@@ -44,11 +44,10 @@ const upload = multer({ storage });
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
-let hashcatProcess = null;
-let potfileWatcher = null;
-let lastPotfileSize = 0;
+// --- MULTI-SESSION STATE ---
+const activeSessions = {};
+let sessionCounter = 0; 
 
-// --- Helper: Generate IDs ---
 const uuid = () => Math.random().toString(36).substring(2, 9);
 
 const getHashcatConfig = () => {
@@ -82,6 +81,7 @@ const parseArgs = (cmd) => {
   return args;
 };
 
+// Robust Potfile Parser
 const parsePotfileLine = (line) => {
     const trimmed = line.trim();
     if (!trimmed) return null;
@@ -115,40 +115,7 @@ const getFullPotfile = () => {
             return null;
         }).filter(item => item !== null);
     } catch (e) {
-        console.error("Error reading full potfile:", e);
         return [];
-    }
-};
-
-const processNewPotfileEntries = () => {
-    if (!fs.existsSync(POTFILE_PATH)) return;
-    try {
-        const stats = fs.statSync(POTFILE_PATH);
-        const currentSize = stats.size;
-        if (currentSize > lastPotfileSize) {
-            const stream = fs.createReadStream(POTFILE_PATH, { 
-                start: lastPotfileSize, 
-                end: currentSize 
-            });
-            let buffer = '';
-            stream.on('data', (chunk) => { buffer += chunk.toString(); });
-            stream.on('end', () => {
-                const lines = buffer.split('\n');
-                lines.forEach(line => {
-                    const parsed = parsePotfileLine(line);
-                    if (parsed) {
-                        io.emit('crack', { 
-                            hash: parsed.hash, 
-                            plain: parsed.plain, 
-                            full: parsed.full 
-                        });
-                    }
-                });
-            });
-            lastPotfileSize = currentSize;
-        }
-    } catch (err) {
-        console.error("Error reading potfile:", err);
     }
 };
 
@@ -168,6 +135,113 @@ app.post('/api/target', (req, res) => {
     } catch (e) {
         res.status(500).json({ message: 'Write failed' });
     }
+});
+
+// NEW: Identify Devices (FIXED FOR MULTI-LINE FORMAT)
+app.post('/api/system/devices', (req, res) => {
+    const { executable, cwd } = getHashcatConfig();
+    const args = ['-I'];
+    
+    try {
+        const proc = spawn(executable, args, { cwd });
+        let output = '';
+        let errorOutput = '';
+        
+        proc.stdout.on('data', (d) => output += d.toString());
+        proc.stderr.on('data', (d) => errorOutput += d.toString());
+        
+        proc.on('close', () => {
+            const devices = [];
+            const fullOutput = output + '\n' + errorOutput;
+            const lines = fullOutput.split('\n');
+            
+            let currentBackend = 'OpenCL'; // Default fallback
+            let currentDevice = null;
+            
+            lines.forEach(line => {
+                const clean = line.trim();
+                if (!clean) return;
+
+                // Detect Section Headers
+                if (clean.includes('CUDA Info')) currentBackend = 'CUDA';
+                else if (clean.includes('OpenCL Info')) currentBackend = 'OpenCL';
+                else if (clean.includes('HIP Info')) currentBackend = 'HIP';
+
+                // Detect Start of Device Block: "Backend Device ID #01"
+                const idMatch = clean.match(/Backend Device ID #(\d+)/i);
+                if (idMatch) {
+                    // Push previous device if exists
+                    if (currentDevice) {
+                        // Check for duplicates before pushing
+                        if(!devices.some(d => d.id === currentDevice.id)) {
+                             devices.push(currentDevice);
+                        }
+                    }
+                    
+                    // Start new device
+                    currentDevice = { 
+                        id: idMatch[1], 
+                        name: 'Unknown Device', 
+                        type: currentBackend 
+                    };
+                }
+
+                // Detect Name Line: "Name...........: "
+                const nameMatch = clean.match(/Name\.+:\s+(.+)/i);
+                if (nameMatch && currentDevice) {
+                    currentDevice.name = nameMatch[1].trim();
+                }
+            });
+
+            // Push the last device found
+            if (currentDevice) {
+                 if(!devices.some(d => d.id === currentDevice.id)) {
+                     devices.push(currentDevice);
+                 }
+            }
+
+            res.json({ devices, raw: fullOutput });
+        });
+
+        proc.on('error', (err) => {
+            res.status(500).json({ devices: [], raw: `Spawn Error: ${err.message}` });
+        });
+
+    } catch (e) {
+        res.status(500).json({ devices: [], raw: `Execution Error: ${e.message}` });
+    }
+});
+
+// NEW: File System Scanner for Resources
+app.post('/api/fs/scan', (req, res) => {
+    const { dirPath } = req.body;
+    if (!dirPath || !fs.existsSync(dirPath)) return res.json({ wordlists: [], rules: [], masks: [] });
+
+    const results = { wordlists: [], rules: [], masks: [] };
+    
+    const scanDir = (currentPath, depth = 0) => {
+        if (depth > 3) return; // Limit depth
+        try {
+            const files = fs.readdirSync(currentPath);
+            files.forEach(file => {
+                const fullPath = path.join(currentPath, file);
+                const stat = fs.statSync(fullPath);
+                
+                if (stat.isDirectory()) {
+                    scanDir(fullPath, depth + 1);
+                } else {
+                    if (file.endsWith('.txt') || file.endsWith('.dic') || file.endsWith('.found')) results.wordlists.push({ name: file, path: fullPath });
+                    else if (file.endsWith('.rule') || file.endsWith('.txt')) results.rules.push({ name: file, path: fullPath });
+                    else if (file.endsWith('.hcmask')) results.masks.push({ name: file, path: fullPath });
+                }
+            });
+        } catch (e) {
+            
+        }
+    };
+
+    scanDir(dirPath);
+    res.json(results);
 });
 
 app.post('/api/identify', (req, res) => {
@@ -192,21 +266,52 @@ app.post('/api/identify', (req, res) => {
 });
 
 app.post('/api/session/start', (req, res) => {
-  if (hashcatProcess) return res.status(400).json({ message: 'Session running' });
   const { customCommand, targetPath, restore, ...config } = req.body;
+  
+  sessionCounter++;
+  const sessionId = `s_${Date.now()}_${uuid()}`;
+  const friendlyName = `Session #${sessionCounter} (${config.hashType || 'Restore'})`;
+  
+  const sessionPotFile = path.join(uploadDir, `${sessionId}.potfile`);
+
+  let initialSize = 0;
+  try {
+      if (fs.existsSync(POTFILE_PATH)) {
+          fs.copyFileSync(POTFILE_PATH, sessionPotFile);
+          initialSize = fs.statSync(sessionPotFile).size;
+      } else {
+          fs.writeFileSync(sessionPotFile, ''); 
+      }
+  } catch (e) {
+      console.error("Error creating session potfile", e);
+  }
+
   let args = [];
 
   if (restore) {
-    args.push('--restore', '--status', '--status-timer', (config.statusTimer || 30).toString(), '--potfile-path', POTFILE_PATH);
+    args.push('--restore', '--status', '--status-timer', (config.statusTimer || 30).toString());
+    args.push('--potfile-path', sessionPotFile);
     if (config.hwmonDisable) args.push('--hwmon-disable');
     if (config.backendDisableOpenCL) args.push('--backend-ignore-opencl'); 
     if (config.backendIgnoreCuda) args.push('--backend-ignore-cuda');
   } else if (customCommand) {
     args = parseArgs(customCommand);
     if (args.length > 0 && args[0].toLowerCase().includes('hashcat')) args.shift();
+    if (!args.includes('--potfile-path')) {
+        args.push('--potfile-path', sessionPotFile);
+    }
   } else {
     args.push('-m', config.hashType, '-a', config.attackMode.toString(), '-w', config.workloadProfile.toString());
-    args.push('--potfile-path', POTFILE_PATH, '--status', '--status-timer', (config.statusTimer || 30).toString());
+    
+    // Use devices if specified
+    if (config.devices) {
+        args.push('-d', config.devices);
+    }
+
+    args.push('--potfile-path', sessionPotFile);
+    args.push('--status', '--status-timer', (config.statusTimer || 30).toString());
+    args.push('--session', sessionId);
+
     if (config.optimizedKernel) args.push('-O');
     if (config.remove) args.push('--remove');
     if (config.hwmonDisable) args.push('--hwmon-disable');
@@ -217,324 +322,362 @@ app.post('/api/session/start', (req, res) => {
     if (config.logfileDisable) args.push('--logfile-disable');
     if (config.force) args.push('--force');
     if (config.bitmapMax && config.bitmapMax !== 24) args.push(`--bitmap-max=${config.bitmapMax}`);
-    if (config.spinDamp && config.spinDamp !== 100) args.push(`--spin-damp=${config.spinDamp}`);
     if (config.skip && config.skip > 0) args.push('-s', config.skip.toString());
     
-    // 1. Push Target File first
     if (targetPath) args.push(targetPath);
 
-    // 2. Push Attack Mode specific arguments
     const mode = Number(config.attackMode);
-    
     if (mode === 0) {
-        // Straight
         if (config.wordlistPath) args.push(config.wordlistPath);
         if (config.rulePath) args.push('-r', config.rulePath);
     } 
     else if (mode === 1) {
-        // Combination: Needs Left List + Right List
         if (config.wordlistPath) args.push(config.wordlistPath);
         if (config.wordlistPath2) args.push(config.wordlistPath2);
     } 
     else if (mode === 3) {
-        // Brute Force
         if (config.maskFile) args.push(config.maskFile);
         else if (config.mask) args.push(config.mask);
     } 
     else if (mode === 6 || mode === 7) {
-        // Hybrid
         const w = config.wordlistPath;
         const m = config.maskFile || config.mask;
         if (mode === 6) { if(w) args.push(w); if(m) args.push(m); }
         if (mode === 7) { if(m) args.push(m); if(w) args.push(w); }
     }
     else if ([2, 4, 5, 8, 9].includes(mode)) {
-        // Other Single-Wordlist Modes
         if (config.wordlistPath) args.push(config.wordlistPath);
     }
   }
 
   const { executable, cwd } = getHashcatConfig();
-  console.log(`[Spawn] ${executable} ${args.join(' ')}`);
+  console.log(`[Spawn ${sessionId}] ${executable} ${args.join(' ')}`);
   
-  try {
-      if (fs.existsSync(POTFILE_PATH)) lastPotfileSize = fs.statSync(POTFILE_PATH).size;
-      else lastPotfileSize = 0;
-      if (potfileWatcher) fs.unwatchFile(POTFILE_PATH);
-      fs.watchFile(POTFILE_PATH, { interval: 1000 }, processNewPotfileEntries);
-      potfileWatcher = true;
-  } catch (e) { console.error("Failed to setup potfile watcher", e); }
+  let lastSessionPotSize = initialSize;
   
+  const checkSessionPotfile = () => {
+      try {
+          if (!fs.existsSync(sessionPotFile)) return;
+          const stats = fs.statSync(sessionPotFile);
+          
+          if (stats.size > lastSessionPotSize) {
+              const stream = fs.createReadStream(sessionPotFile, { start: lastSessionPotSize, end: stats.size });
+              let buffer = '';
+              stream.on('data', c => buffer += c.toString());
+              stream.on('end', () => {
+                  const lines = buffer.split('\n');
+                  lines.forEach(line => {
+                      const parsed = parsePotfileLine(line);
+                      if (parsed) {
+                          io.emit('session_crack', { sessionId, hash: parsed.hash, plain: parsed.plain });
+                          try { fs.appendFileSync(POTFILE_PATH, line + '\n'); } catch (e) { }
+                      }
+                  });
+              });
+              lastSessionPotSize = stats.size;
+          }
+      } catch (e) { console.error(`Error watching potfile ${sessionId}`, e); }
+  };
+
+  const potWatcher = fs.watchFile(sessionPotFile, { interval: 500 }, checkSessionPotfile);
+
   try {
-    hashcatProcess = spawn(executable, args, { cwd, stdio: 'pipe' });
-    if (hashcatProcess.stdin) hashcatProcess.stdin.setEncoding('utf-8');
-    io.emit('session_status', 'RUNNING');
-    io.emit('log', { level: 'CMD', message: `Running: ${path.basename(executable)} ${args.join(' ')}` });
+    const child = spawn(executable, args, { cwd, stdio: 'pipe' });
+    
+    activeSessions[sessionId] = { 
+        process: child, 
+        startTime: Date.now(), 
+        name: friendlyName,
+        potFile: sessionPotFile,
+        stats: {
+            recovered: 0,
+            total: 0,
+            hashrateSum: 0,
+            hashrateCount: 0,
+            latestSpeeds: {} 
+        }
+    };
+
+    if (child.stdin) child.stdin.setEncoding('utf-8');
+    
+    io.emit('session_started', { sessionId, name: friendlyName, target: targetPath ? path.basename(targetPath) : 'Manual Input' });
+    io.emit('session_status', { sessionId, status: 'RUNNING' });
+    io.emit('log', { sessionId, level: 'CMD', message: `[${friendlyName}] Started` });
 
     let stdoutBuffer = '';
-    hashcatProcess.stdout.on('data', (data) => {
-      stdoutBuffer += data.toString();
-      let lines = stdoutBuffer.split('\n');
-      stdoutBuffer = lines.pop(); 
-      lines.forEach(line => {
-        const trimmedLine = line.trim();
-        if (!trimmedLine) return;
-        let isStatusLine = false;
-        const statusRegex = /Status\.+:\s+(.*)/i;
-        const statusMatch = trimmedLine.match(statusRegex);
-        if (statusMatch) {
-            isStatusLine = true;
-            const currentStatus = statusMatch[1].trim().toUpperCase();
-            if (currentStatus === 'PAUSED') io.emit('session_status', 'PAUSED');
-            else if (currentStatus === 'RUNNING') io.emit('session_status', 'RUNNING');
-            else if (currentStatus === 'EXHAUSTED' || currentStatus === 'QUIT') io.emit('session_status', 'COMPLETED');
-        }
-        const speedRegex = /Speed\.#(\*|\d+).*?:\s+([\d\.]+)\s+([a-zA-Z]+\/s)/i;
-        const speedMatch = trimmedLine.match(speedRegex);
-        if (speedMatch) {
-            isStatusLine = true;
-            const deviceId = speedMatch[1];
-            const val = parseFloat(speedMatch[2]);
-            const unit = speedMatch[3];
-            let hashrate = val;
-            if (unit.toLowerCase() === 'kh/s') hashrate *= 1000;
-            else if (unit.toLowerCase() === 'mh/s') hashrate *= 1000000;
-            else if (unit.toLowerCase() === 'gh/s') hashrate *= 1000000000;
-            const isAggregate = deviceId === '*';
-            io.emit('stats_update', { type: 'hashrate', value: hashrate, isAggregate });
-        }
-        const progressRegex = /Progress.*?:\s+\d+\/\d+\s+\(([\d\.]+)%\)/i;
-        const progMatch = trimmedLine.match(progressRegex);
-        if (progMatch) { isStatusLine = true; io.emit('stats_update', { type: 'progress', value: parseFloat(progMatch[1]) }); }
-        const timeRegex = /Time\.Estimated.*?:\s+(.*)/i;
-        const timeMatch = trimmedLine.match(timeRegex);
-        if (timeMatch) { isStatusLine = true; const timeStr = timeMatch[1].replace(/\(.*\)/, '').trim() || timeMatch[1]; io.emit('stats_update', { type: 'time_estimated', value: timeStr }); }
-        const recoveredRegex = /Recovered.*?:\s+(\d+)\//i;
-        const recMatch = trimmedLine.match(recoveredRegex);
-        if (recMatch) { isStatusLine = true; io.emit('stats_update', { type: 'recovered', value: parseInt(recMatch[1]) }); }
-        io.emit('log', { level: 'INFO', message: trimmedLine });
-      });
+    
+    const parseOutput = (data, isError = false) => {
+        stdoutBuffer += data.toString();
+        let lines = stdoutBuffer.split('\n');
+        stdoutBuffer = lines.pop(); 
+        
+        lines.forEach(line => {
+            const trimmedLine = line.trim();
+            if (!trimmedLine) return;
+            
+            io.emit('log', { sessionId, level: isError ? 'WARN' : 'INFO', message: trimmedLine });
+
+            const statusRegex = /Status\.+:\s+(.*)/i;
+            const statusMatch = trimmedLine.match(statusRegex);
+            if (statusMatch) {
+                const currentStatus = statusMatch[1].trim().toUpperCase();
+                let statusEnum = 'RUNNING';
+                if (currentStatus === 'PAUSED') statusEnum = 'PAUSED';
+                else if (currentStatus === 'EXHAUSTED' || currentStatus === 'QUIT') statusEnum = 'COMPLETED';
+                io.emit('session_status', { sessionId, status: statusEnum });
+            }
+            
+            // Handles both individual (Speed.#1) and aggregate (Speed.#*)
+            const speedRegex = /Speed\.#(\*|\d+).*?:\s+([\d\.]+)\s+([a-zA-Z]+\/s)/i;
+            const speedMatch = trimmedLine.match(speedRegex);
+            if (speedMatch) {
+                const deviceId = speedMatch[1];
+                const val = parseFloat(speedMatch[2]);
+                const unit = speedMatch[3];
+                let hashrate = val;
+                if (unit.toLowerCase() === 'kh/s') hashrate *= 1000;
+                else if (unit.toLowerCase() === 'mh/s') hashrate *= 1000000;
+                else if (unit.toLowerCase() === 'gh/s') hashrate *= 1000000000;
+                
+                if (activeSessions[sessionId]) {
+                    activeSessions[sessionId].stats.latestSpeeds[deviceId] = hashrate;
+                    const knownDevices = Object.keys(activeSessions[sessionId].stats.latestSpeeds);
+                    const isAggregate = deviceId === '*' || (knownDevices.length === 1 && deviceId === '1');
+                    io.emit('stats_update', { sessionId, type: 'hashrate', value: hashrate, isAggregate });
+                }
+            }
+
+            const progressRegex = /Progress.*?:\s+\d+\/\d+\s+\(([\d\.]+)%\)/i;
+            const progMatch = trimmedLine.match(progressRegex);
+            if (progMatch) {
+                io.emit('stats_update', { sessionId, type: 'progress', value: parseFloat(progMatch[1]) });
+                if (activeSessions[sessionId]) {
+                    const s = activeSessions[sessionId].stats;
+                    const speeds = s.latestSpeeds;
+                    
+                    // Prioritize aggregate speed (*) if available, otherwise sum individuals
+                    let currentTotal = speeds['*'];
+                    if (currentTotal === undefined) {
+                        currentTotal = Object.entries(speeds)
+                            .filter(([k]) => !isNaN(parseInt(k)))
+                            .reduce((acc, [, v]) => acc + v, 0);
+                    }
+                    if (currentTotal > 0) {
+                        s.hashrateSum += currentTotal;
+                        s.hashrateCount++;
+                    }
+                }
+            }
+
+            // MODIFIED: Parse "2 days, 19 hours" from parentheses
+            const timeRegex = /Time\.Estimated.*?:\s+(.*)/i;
+            const timeMatch = trimmedLine.match(timeRegex);
+            if (timeMatch) {
+                const fullTimeStr = timeMatch[1];
+                // Extract text inside parentheses e.g. "(2 days, 19 hours)" -> "2 days, 19 hours"
+                const parenMatch = fullTimeStr.match(/\((.*?)\)/);
+                const value = parenMatch ? parenMatch[1] : fullTimeStr;
+                io.emit('stats_update', { sessionId, type: 'time_estimated', value: value });
+            }
+
+            const recoveredRegex = /Recovered.*?:\s+(\d+)\/(\d+)/i;
+            const recMatch = trimmedLine.match(recoveredRegex);
+            if (recMatch) {
+                const r = parseInt(recMatch[1]);
+                const t = parseInt(recMatch[2]);
+                if (activeSessions[sessionId]) {
+                    activeSessions[sessionId].stats.recovered = r;
+                    activeSessions[sessionId].stats.total = t;
+                }
+                io.emit('stats_update', { sessionId, type: 'recovered', value: r });
+                io.emit('stats_update', { sessionId, type: 'total', value: t });
+            }
+        });
+    };
+
+    child.stdout.on('data', d => parseOutput(d, false));
+    child.stderr.on('data', d => parseOutput(d, true));
+
+    child.on('close', (code) => {
+      let duration = 0;
+      let finalStats = { recovered: 0, total: 0, avgHashrate: 0 };
+      
+      if (activeSessions[sessionId]) {
+          const s = activeSessions[sessionId];
+          const endTime = Date.now();
+          duration = (endTime - s.startTime) / 1000;
+          
+          const avg = s.stats.hashrateCount > 0 
+            ? s.stats.hashrateSum / s.stats.hashrateCount 
+            : 0;
+
+          finalStats = {
+              recovered: s.stats.recovered,
+              total: s.stats.total,
+              avgHashrate: avg
+          };
+      }
+
+      io.emit('log', { sessionId, level: code === 0 ? 'SUCCESS' : 'WARN', message: `Session ${friendlyName} exited with code ${code}` });
+      io.emit('session_finished', { sessionId, duration, ...finalStats });
+      io.emit('session_status', { sessionId, status: 'IDLE' }); 
+      
+      fs.unwatchFile(sessionPotFile);
+      if (fs.existsSync(sessionPotFile)) {
+          try { fs.unlinkSync(sessionPotFile); } catch(e) {}
+      }
+
+      if(activeSessions[sessionId]) delete activeSessions[sessionId];
     });
-    hashcatProcess.stderr.on('data', (data) => { const msg = data.toString().trim(); if(msg) io.emit('log', { level: 'WARN', message: msg }); });
-    hashcatProcess.on('close', (code) => {
-      io.emit('log', { level: code === 0 ? 'SUCCESS' : 'WARN', message: `Process exited with code ${code}` });
-      io.emit('session_status', 'IDLE');
-      hashcatProcess = null;
-      if (potfileWatcher) fs.unwatchFile(POTFILE_PATH);
+
+    child.on('error', (err) => {
+        io.emit('log', { sessionId, level: 'ERROR', message: err.message });
+        io.emit('session_status', { sessionId, status: 'ERROR' });
+        fs.unwatchFile(sessionPotFile);
+        if(activeSessions[sessionId]) delete activeSessions[sessionId];
     });
-    hashcatProcess.on('error', (err) => { io.emit('log', { level: 'ERROR', message: err.message }); io.emit('session_status', 'IDLE'); hashcatProcess = null; if (potfileWatcher) fs.unwatchFile(POTFILE_PATH); });
-    res.json({ success: true });
-  } catch (e) { res.status(500).json({ message: e.message }); }
+
+    res.json({ success: true, sessionId });
+  } catch (e) { 
+      res.status(500).json({ message: e.message }); 
+  }
 });
 
 app.post('/api/session/stop', (req, res) => {
-  if (hashcatProcess) {
-    hashcatProcess.kill();
-    hashcatProcess = null;
-    io.emit('session_status', 'IDLE');
-    if (potfileWatcher) fs.unwatchFile(POTFILE_PATH);
-    res.json({ success: true });
-  } else { res.status(400).json({ message: 'No session' }); }
+  const { sessionId } = req.body;
+  
+  const stopSession = (id) => {
+      if(activeSessions[id]) {
+          const s = activeSessions[id];
+          try { if(s.process) s.process.kill('SIGKILL'); } catch(e) {}
+          if(s.potFile && fs.existsSync(s.potFile)) {
+              fs.unwatchFile(s.potFile);
+              try { fs.unlinkSync(s.potFile); } catch(e) {}
+          }
+          io.emit('log', { sessionId: id, level: 'WARN', message: `Session ${s.name} stopped manually.` });
+          io.emit('session_status', { sessionId: id, status: 'IDLE' }); 
+          // FIX: Do NOT delete session here. Let the process 'close' event handle stats saving and cleanup.
+          return s.name;
+      }
+      return null;
+  }
+
+  if (sessionId) {
+      const name = stopSession(sessionId);
+      if(name) return res.json({ success: true, message: `Stopped ${name}` });
+      io.emit('session_status', { sessionId, status: 'IDLE' });
+      return res.json({ success: true, message: 'Session stopped (was not active)' });
+  } 
+  else if (Object.keys(activeSessions).length === 1) {
+      const id = Object.keys(activeSessions)[0];
+      stopSession(id);
+      return res.json({ success: true, message: `Stopped session` });
+  }
+  
+  res.status(400).json({ message: 'Session not found or no ID provided' });
 });
 
-// --- UPDATED: Check Target against Potfile (Stream Optimized) ---
 app.post('/api/target/check', async (req, res) => {
     const { targetPath, content } = req.body;
-    
-    // 1. Load Potfile Map (Stream to prevent memory overflow)
     const potfileMap = new Map(); 
     if (fs.existsSync(POTFILE_PATH)) {
         try {
             const potStream = fs.createReadStream(POTFILE_PATH);
-            const potRl = readline.createInterface({
-                input: potStream,
-                crlfDelay: Infinity
-            });
-
+            const potRl = readline.createInterface({ input: potStream, crlfDelay: Infinity });
             for await (const line of potRl) {
                 const parsed = parsePotfileLine(line);
                 if (parsed) potfileMap.set(parsed.hash, parsed.plain);
             }
-        } catch (e) {
-            console.error("Error reading potfile map:", e);
-        }
+        } catch (e) { console.error("Error reading potfile map:", e); }
     }
-
-    // 2. Prepare Output
     const resultFilename = `check_result_${Date.now()}.txt`;
     const resultPath = path.join(uploadDir, resultFilename);
     const writeStream = fs.createWriteStream(resultPath);
-
     const found = [];
     let foundCount = 0;
     let totalProcessed = 0;
-
-    // 3. Process Target via Stream (Memory Safe)
     try {
         let inputStream;
+        if (content) inputStream = Readable.from(content.split('\n'));
+        else if (targetPath && fs.existsSync(targetPath)) inputStream = fs.createReadStream(targetPath);
+        else return res.status(400).json({ message: 'No valid target found' });
 
-        if (content) {
-            inputStream = Readable.from(content.split('\n'));
-        } else if (targetPath && fs.existsSync(targetPath)) {
-            inputStream = fs.createReadStream(targetPath);
-        } else {
-             return res.status(400).json({ message: 'No valid target found' });
-        }
-
-        const rl = readline.createInterface({
-            input: inputStream,
-            crlfDelay: Infinity
-        });
-
+        const rl = readline.createInterface({ input: inputStream, crlfDelay: Infinity });
         for await (const line of rl) {
             const hash = line.trim();
             if (!hash) continue;
-            
             totalProcessed++;
-
             if (potfileMap.has(hash)) {
                 const plain = potfileMap.get(hash);
                 const entry = `${hash}:${plain}\n`;
-                
-                // Handle backpressure
-                if (writeStream.write(entry) === false) {
-                    await new Promise(resolve => writeStream.once('drain', resolve));
-                }
-                
-                // Only keep first 100 in RAM for UI
-                if (foundCount < 100) {
-                    found.push({ hash, plain });
-                }
+                if (writeStream.write(entry) === false) await new Promise(resolve => writeStream.once('drain', resolve));
+                if (foundCount < 100) found.push({ hash, plain });
                 foundCount++;
             }
         }
-
         writeStream.end();
-
         writeStream.on('finish', () => {
-            potfileMap.clear(); // Free memory
-            res.json({ 
-                totalTarget: totalProcessed, 
-                foundCount: foundCount, 
-                preview: found, 
-                downloadToken: resultFilename 
-            });
+            potfileMap.clear();
+            res.json({ totalTarget: totalProcessed, foundCount, preview: found, downloadToken: resultFilename });
         });
-
     } catch (err) {
-        console.error("Stream processing error:", err);
         if (!res.headersSent) res.status(500).json({ message: 'Failed to process large file' });
     }
 });
 
-// --- NEW: Download Route for Large Checks ---
 app.get('/api/download/check-result/:filename', (req, res) => {
     const filename = req.params.filename;
-    // Simple security: ensure it only allows alphanumeric + dots/underscores
-    if (!/^[a-zA-Z0-9_.]+$/.test(filename)) {
-        return res.status(400).send("Invalid filename");
-    }
+    if (!/^[a-zA-Z0-9_.]+$/.test(filename)) return res.status(400).send("Invalid filename");
     const filePath = path.join(uploadDir, filename);
-    if (fs.existsSync(filePath)) {
-        res.download(filePath);
-    } else {
-        res.status(404).send("File not found");
-    }
+    if (fs.existsSync(filePath)) res.download(filePath);
+    else res.status(404).send("File not found");
 });
 
-// --- ROUTES FOR HISTORY PERSISTENCE ---
-
-// 1. Get History
 app.get('/api/history/sessions', (req, res) => {
     if (!fs.existsSync(SESSIONS_PATH)) return res.json([]);
-    try {
-        const data = fs.readFileSync(SESSIONS_PATH, 'utf-8');
-        res.json(JSON.parse(data));
-    } catch (e) {
-        console.error("Error reading sessions:", e);
-        res.json([]);
-    }
+    try { res.json(JSON.parse(fs.readFileSync(SESSIONS_PATH, 'utf-8'))); } catch (e) { res.json([]); }
 });
 
-// 2. Save Session
 app.post('/api/history/sessions', (req, res) => {
     const newSession = req.body;
     let sessions = [];
-    
     if (fs.existsSync(SESSIONS_PATH)) {
-        try {
-            sessions = JSON.parse(fs.readFileSync(SESSIONS_PATH, 'utf-8'));
-        } catch (e) {
-            console.error("Error parsing sessions file, resetting:", e);
-        }
+        try { sessions = JSON.parse(fs.readFileSync(SESSIONS_PATH, 'utf-8')); } catch (e) {}
     }
-    
-    // Add new session to the top of the list
     sessions.unshift(newSession);
-    
-    // Optional: Limit history to last 100 entries to prevent infinite growth
     if (sessions.length > 100) sessions = sessions.slice(0, 100);
-
-    try {
-        fs.writeFileSync(SESSIONS_PATH, JSON.stringify(sessions, null, 2));
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ message: 'Failed to save session history' });
-    }
+    try { fs.writeFileSync(SESSIONS_PATH, JSON.stringify(sessions, null, 2)); res.json({ success: true }); } 
+    catch (e) { res.status(500).json({ message: 'Failed to save session history' }); }
 });
 
-// --- INTERACTIVE TERMINAL & SOCKET SETUP ---
-const shell = os.platform() === 'win32' ? 'powershell.exe' : 'bash';
-
 io.on('connection', (socket) => {
-  // 1. Sync Dashboard Data
   const history = getFullPotfile();
   socket.emit('potfile_sync', history);
-  if (hashcatProcess) socket.emit('session_status', 'RUNNING');
+  
+  Object.keys(activeSessions).forEach(sessionId => {
+      socket.emit('session_started', { sessionId, name: activeSessions[sessionId].name });
+      socket.emit('session_status', { sessionId, status: 'RUNNING' });
+  });
 
-  // 2. Terminal Logic
   let ptyProcess = null;
-
   socket.on('term_init', () => {
     if (ptyProcess || !pty) return;
-    
     const { executable, cwd } = getHashcatConfig();
-    
-    // Spawn PTY in the hashcat folder
     try {
-        ptyProcess = pty.spawn(shell, [], {
-            name: 'xterm-color',
-            cols: 80,
-            rows: 30,
-            cwd: cwd,
+        ptyProcess = pty.spawn(os.platform() === 'win32' ? 'powershell.exe' : 'bash', [], {
+            name: 'xterm-color', 
+            cols: 80, 
+            rows: 30, 
+            cwd: cwd, 
             env: process.env
         });
-
         ptyProcess.onData((data) => socket.emit('term_output', data));
-        
         socket.emit('term_output', `\r\n*** Interactive Reactor Shell ***\r\n`);
-        socket.emit('term_output', `*** Working Directory: ${cwd} ***\r\n`);
-        socket.emit('term_output', `*** Type './hashcat' (Linux/Mac) or '.\\hashcat.exe' (Win) ***\r\n\r\n`);
-
-    } catch (err) {
-        socket.emit('term_output', `\r\nError launching shell: ${err.message}\r\n`);
-    }
+    } catch (err) { socket.emit('term_output', `\r\nError launching shell: ${err.message}\r\n`); }
   });
-
-  socket.on('term_input', (data) => {
-    if (ptyProcess) ptyProcess.write(data);
-  });
-
-  socket.on('term_resize', ({ cols, rows }) => {
-    if (ptyProcess) ptyProcess.resize(cols, rows);
-  });
-
-  socket.on('disconnect', () => {
-    if (ptyProcess) {
-        ptyProcess.kill();
-        ptyProcess = null;
-    }
-  });
+  socket.on('term_input', (data) => { if (ptyProcess) ptyProcess.write(data); });
+  socket.on('term_resize', ({ cols, rows }) => { if (ptyProcess) ptyProcess.resize(cols, rows); });
+  socket.on('disconnect', () => { if (ptyProcess) { ptyProcess.kill(); ptyProcess = null; } });
 });
 
 const PORT = 3001;
