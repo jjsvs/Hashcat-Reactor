@@ -1,6 +1,7 @@
 import React, { useRef } from 'react'; 
 import { RecoveredHash } from '../types';
 import { ShieldCheck, Copy, Globe, CheckCircle } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 interface Props {
   hashes: RecoveredHash[];
@@ -8,13 +9,14 @@ interface Props {
 }
 
 const RecoveredHashList: React.FC<Props> = ({ hashes, onSendToEscrow }) => {
+  const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
   };
 
-  // NEW: Helper to decode Hashcat HEX output ($HEX[...]) to readable text
+  // Helper to decode Hashcat HEX output ($HEX[...]) to readable text
   const decodePlain = (plain: string) => {
       if (!plain) return '';
       const hexMatch = plain.match(/^\$HEX\[([a-fA-F0-9]+)\]$/);
@@ -39,7 +41,7 @@ const RecoveredHashList: React.FC<Props> = ({ hashes, onSendToEscrow }) => {
       <div className="bg-slate-900 px-4 py-3 border-b border-slate-800 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2">
             <ShieldCheck size={16} className="text-emerald-400" />
-            <span className="text-slate-200 font-bold text-sm">Recovered Hashes</span>
+            <span className="text-slate-200 font-bold text-sm">{t('rec_title')}</span>
             <span className="bg-emerald-500/10 text-emerald-400 text-xs px-2 py-0.5 rounded-full font-mono border border-emerald-500/20">
                 {hashes.length}
             </span>
@@ -55,7 +57,7 @@ const RecoveredHashList: React.FC<Props> = ({ hashes, onSendToEscrow }) => {
                 }`}
             >
                 <Globe size={14} /> 
-                {newCount > 0 ? 'Send New' : 'All Sent'}
+                {newCount > 0 ? t('btn_send_new') : t('btn_all_sent')}
             </button>
         )}
       </div>
@@ -67,7 +69,7 @@ const RecoveredHashList: React.FC<Props> = ({ hashes, onSendToEscrow }) => {
         {hashes.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-slate-600 gap-2 opacity-50">
                 <ShieldCheck size={32} />
-                <span className="text-xs">No hashes recovered yet</span>
+                <span className="text-xs">{t('rec_empty')}</span>
             </div>
         ) : (
             <div className="divide-y divide-slate-800/50">
@@ -82,7 +84,7 @@ const RecoveredHashList: React.FC<Props> = ({ hashes, onSendToEscrow }) => {
                         >
                             <div className="flex items-center gap-3 overflow-hidden">
                                 {item.sentToEscrow && (
-                                  <div title="Sent to Escrow">
+                                  <div title={t('rec_sent_tooltip')}>
                                     <CheckCircle size={14} className="text-emerald-500/50" />
                                   </div>
                                 )}
@@ -98,7 +100,7 @@ const RecoveredHashList: React.FC<Props> = ({ hashes, onSendToEscrow }) => {
                             <button 
                                 onClick={() => copyToClipboard(`${item.hash}:${readablePlain}`)}
                                 className="p-2 text-slate-500 hover:text-white hover:bg-slate-800 rounded opacity-0 group-hover:opacity-100 transition-all"
-                                title="Copy hash:plain"
+                                title={t('rec_copy_tooltip')}
                             >
                                 <Copy size={14} />
                             </button>

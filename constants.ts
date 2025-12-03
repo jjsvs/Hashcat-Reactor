@@ -30,6 +30,12 @@ export const DEFAULT_CONFIG: HashcatConfig = {
   mask: '?a?a?a?a?a?a?a',
   maskFile: '',
   
+  // Increment Settings
+  increment: false,
+  incrementMin: 1,
+  incrementMax: 8,
+  incrementInverse: false,
+
   optimizedKernel: true,
   workloadProfile: 3,
   statusTimer: 30, 

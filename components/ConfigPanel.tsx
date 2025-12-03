@@ -1,7 +1,12 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { HashcatConfig as IConfig } from '../types';
 import { ATTACK_MODES, HASH_TYPES } from '../constants';
-import { Copy, Terminal, Settings, Play, FolderOpen, ChevronDown, ChevronRight, Zap, Layers, Edit3, Lock, Wand2, Loader2, ListPlus, Cpu, HardDrive, RefreshCw, ToggleLeft, ToggleRight } from 'lucide-react';
+import { 
+  Copy, Terminal, Settings, Play, FolderOpen, ChevronDown, ChevronRight, 
+  Zap, Layers, Edit3, Lock, Wand2, Loader2, ListPlus, Cpu, HardDrive, 
+  RefreshCw, ToggleLeft, ToggleRight, ArrowUpRight, ArrowLeftRight 
+} from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 interface ConfigPanelProps {
   config: IConfig;
@@ -22,6 +27,7 @@ interface Resources {
 }
 
 const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, onQueue }) => {
+  const { t } = useTranslation();
   
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [isManualMode, setIsManualMode] = useState(false);
@@ -153,6 +159,16 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
     if (config.scryptTmto !== 0) parts.push(`--scrypt-tmto=${config.scryptTmto}`);
     if (config.segmentSize !== 0) parts.push(`--segment-size=${config.segmentSize}`);
 
+    // --- INCREMENT FLAGS ---
+    // These enable variable length attacks (e.g. 1 to 8 characters)
+    if (config.increment) {
+        parts.push('--increment');
+        if (config.incrementMin) parts.push(`--increment-min=${config.incrementMin}`);
+        if (config.incrementMax) parts.push(`--increment-max=${config.incrementMax}`);
+        // Adds support for Reverse Increment (Right-to-Left)
+        if (config.incrementInverse) parts.push('--increment-inverse');
+    }
+
     // Use targetPath from config if available
     parts.push(config.targetPath || '[target]');
 
@@ -257,20 +273,20 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
         {/* 1. GENERAL CONFIGURATION & RESOURCE LIBRARY */}
         <div className="bg-slate-900 border border-slate-800 p-6 rounded-xl shadow-sm">
            <h3 className="text-indigo-400 font-mono text-xs uppercase tracking-wider mb-4 flex items-center gap-2 font-bold">
-             <Settings size={14} /> General & Resources
+             <Settings size={14} /> {t('config_general_title')}
            </h3>
            
-           {/* Library Path Section (Merged) */}
+           {/* Library Path Section */}
            <div className="bg-slate-950/50 rounded-lg p-4 border border-slate-800 mb-6">
               <div className="flex items-center justify-between mb-2">
-                 <h4 className="text-xs font-bold text-slate-400 uppercase flex items-center gap-2"><HardDrive size={12}/> Resource Library Path</h4>
+                 <h4 className="text-xs font-bold text-slate-400 uppercase flex items-center gap-2"><HardDrive size={12}/> {t('config_library_path')}</h4>
                  <button 
                     onClick={handleScanResources}
                     disabled={scanningResources || !config.resourcesPath}
                     className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
                   >
                     {scanningResources ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />}
-                    Scan Library
+                    {t('config_scan_btn')}
                   </button>
               </div>
               <div className="flex gap-2">
@@ -291,7 +307,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
              {/* Ident & Attack */}
              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
-                  <label className="block text-xs font-bold text-slate-500 mb-2 uppercase">Attack Mode (-a)</label>
+                  <label className="block text-xs font-bold text-slate-500 mb-2 uppercase">{t('config_attack_mode')}</label>
                   <select 
                     value={config.attackMode}
                     onChange={e => setConfig({...config, attackMode: parseInt(e.target.value)})}
@@ -301,7 +317,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                   </select>
                 </div>
                 <div>
-                  <label className="block text-xs font-bold text-slate-500 mb-2 uppercase">Hash Type (-m)</label>
+                  <label className="block text-xs font-bold text-slate-500 mb-2 uppercase">{t('config_hash_type')}</label>
                   <div className="flex gap-2">
                     <select 
                       value={config.hashType}
@@ -314,7 +330,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                       onClick={handleAutoDetect}
                       disabled={detecting}
                       className="bg-indigo-600/10 text-indigo-400 border border-indigo-600/30 rounded-lg px-3 hover:bg-indigo-600/20 transition-colors"
-                      title="Auto Detect from File"
+                      title={t('config_auto_detect')}
                     >
                       {detecting ? <Loader2 className="animate-spin" size={16}/> : <Wand2 size={16} />}
                     </button>
@@ -324,7 +340,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
 
              {/* Dynamic Resources Inputs based on Attack Mode */}
              <div className="bg-slate-950/50 rounded-lg p-4 border border-slate-800 space-y-4">
-                <h4 className="text-xs font-bold text-slate-400 uppercase mb-2">Selected Resources</h4>
+                <h4 className="text-xs font-bold text-slate-400 uppercase mb-2">{t('config_selected_resources')}</h4>
                 
                 {/* Wordlist Input Logic */}
                 {showWordlistInput && (
@@ -332,14 +348,14 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                     <div>
                       <div className="flex justify-between items-center mb-2">
                         <label className="text-xs font-bold text-slate-500">
-                          {config.attackMode === 1 ? 'Left Wordlist' : 'Wordlist'}
+                          {config.attackMode === 1 ? t('config_wordlist_left') : t('config_wordlist')}
                         </label>
                         <button 
                            onClick={() => toggleInputMode('wordlist')} 
                            className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-white"
                         >
                            {inputModes.wordlist === 'library' ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
-                           {inputModes.wordlist === 'library' ? 'Using Library' : 'Using File Path'}
+                           {inputModes.wordlist === 'library' ? t('config_use_library') : t('config_use_file')}
                         </button>
                       </div>
 
@@ -376,13 +392,13 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                     {config.attackMode === 1 && (
                       <div>
                          <div className="flex justify-between items-center mb-2">
-                            <label className="text-xs font-bold text-slate-500">Right Wordlist</label>
+                            <label className="text-xs font-bold text-slate-500">{t('config_wordlist_right')}</label>
                             <button 
                                onClick={() => toggleInputMode('wordlist2')} 
                                className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-white"
                             >
                                {inputModes.wordlist2 === 'library' ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
-                               {inputModes.wordlist2 === 'library' ? 'Using Library' : 'Using File Path'}
+                               {inputModes.wordlist2 === 'library' ? t('config_use_library') : t('config_use_file')}
                             </button>
                          </div>
                          
@@ -420,13 +436,13 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                     {config.attackMode === 0 && (
                       <div>
                         <div className="flex justify-between items-center mb-2">
-                            <label className="text-xs font-bold text-slate-500">Rule File</label>
+                            <label className="text-xs font-bold text-slate-500">{t('config_rule_file')}</label>
                             <button 
                                onClick={() => toggleInputMode('rule')} 
                                className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-white"
                             >
                                {inputModes.rule === 'library' ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
-                               {inputModes.rule === 'library' ? 'Using Library' : 'Using File Path'}
+                               {inputModes.rule === 'library' ? t('config_use_library') : t('config_use_file')}
                             </button>
                         </div>
 
@@ -466,7 +482,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                 {showMaskInput && (
                    <div className="space-y-4">
                       <div>
-                          <label className="block text-xs font-bold text-slate-500 mb-2">Mask Pattern</label>
+                          <label className="block text-xs font-bold text-slate-500 mb-2">{t('config_mask_pattern')}</label>
                           <input 
                             type="text"
                             value={config.mask}
@@ -477,13 +493,13 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                       </div>
                        <div>
                           <div className="flex justify-between items-center mb-2">
-                            <label className="text-xs font-bold text-slate-500">Or Mask File (.hcmask)</label>
+                            <label className="text-xs font-bold text-slate-500">{t('config_mask_file')}</label>
                             <button 
                                onClick={() => toggleInputMode('mask')} 
                                className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-white"
                             >
                                {inputModes.mask === 'library' ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
-                               {inputModes.mask === 'library' ? 'Using Library' : 'Using File Path'}
+                               {inputModes.mask === 'library' ? t('config_use_library') : t('config_use_file')}
                             </button>
                           </div>
                           
@@ -518,6 +534,68 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                                 </div>
                           )}
                       </div>
+
+                      {/* --- INCREMENT & INCREMENT INVERSE OPTIONS --- */}
+                      <div className="pt-2 border-t border-slate-800 mt-2">
+                        
+                        {/* 1. Toggle Increment */}
+                        <div className="flex items-center justify-between mb-2">
+                            <label className="flex items-center gap-2 cursor-pointer">
+                                <input 
+                                    type="checkbox" 
+                                    checked={!!config.increment} 
+                                    onChange={(e) => setConfig({...config, increment: e.target.checked})}
+                                    className="w-4 h-4 rounded border-slate-700 bg-slate-950 checked:bg-indigo-600 focus:ring-indigo-500/20"
+                                />
+                                <span className="text-xs font-bold text-slate-400 hover:text-white flex items-center gap-1">
+                                    <ArrowUpRight size={12}/> {t('config_increment_enable')}
+                                </span>
+                            </label>
+
+                            {/* 2. Toggle Increment Inverse */}
+                            {config.increment && (
+                                <label className="flex items-center gap-2 cursor-pointer animate-in fade-in">
+                                    <input 
+                                        type="checkbox" 
+                                        checked={!!config.incrementInverse} 
+                                        onChange={(e) => setConfig({...config, incrementInverse: e.target.checked})}
+                                        className="w-4 h-4 rounded border-slate-700 bg-slate-950 checked:bg-indigo-600 focus:ring-indigo-500/20"
+                                    />
+                                    <span className="text-xs font-bold text-slate-400 hover:text-white flex items-center gap-1" title="Increment from Right-to-Left">
+                                        <ArrowLeftRight size={12}/> {t('config_increment_inverse')}
+                                    </span>
+                                </label>
+                            )}
+                        </div>
+                        
+                        {/* 3. Min / Max Inputs */}
+                        {config.increment && (
+                             <div className="grid grid-cols-2 gap-4 pl-6 animate-in fade-in slide-in-from-top-1">
+                                <div>
+                                    <label className="block text-[10px] font-bold text-slate-500 mb-1">{t('config_increment_min')}</label>
+                                    <input 
+                                      type="number"
+                                      min="1"
+                                      value={config.incrementMin}
+                                      onChange={(e) => setConfig({...config, incrementMin: parseInt(e.target.value)})}
+                                      className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 focus:border-indigo-500 outline-none"
+                                      placeholder="1"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-[10px] font-bold text-slate-500 mb-1">{t('config_increment_max')}</label>
+                                    <input 
+                                      type="number"
+                                      min="1"
+                                      value={config.incrementMax}
+                                      onChange={(e) => setConfig({...config, incrementMax: parseInt(e.target.value)})}
+                                      className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 focus:border-indigo-500 outline-none"
+                                      placeholder="8"
+                                    />
+                                </div>
+                             </div>
+                        )}
+                      </div>
                    </div>
                 )}
              </div>
@@ -527,12 +605,12 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
         {/* 2. PERFORMANCE & FLAGS */}
         <div className="bg-slate-900 border border-slate-800 p-6 rounded-xl shadow-sm">
            <h3 className="text-indigo-400 font-mono text-xs uppercase tracking-wider mb-4 flex items-center gap-2 font-bold">
-             <Zap size={14} /> Performance & Flags
+             <Zap size={14} /> {t('config_perf_title')}
            </h3>
            
            <div className="space-y-4">
               <div>
-                <label className="block text-xs font-bold text-slate-500 mb-2">Workload Profile (-w)</label>
+                <label className="block text-xs font-bold text-slate-500 mb-2">{t('config_workload')}</label>
                 <div className="flex gap-2">
                   {[1,2,3,4].map(w => (
                     <button
@@ -547,7 +625,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
               </div>
               
               <div>
-                <label className="block text-xs font-bold text-slate-500 mb-2">Status Update Frequency (seconds)</label>
+                <label className="block text-xs font-bold text-slate-500 mb-2">{t('config_status_timer')}</label>
                 <input 
                   type="number" 
                   value={config.statusTimer}
@@ -559,10 +637,10 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2">
                   {[
-                    { label: 'Optimized Kernels (-O)', key: 'optimizedKernel' },
-                    { label: 'Remove Found (--remove)', key: 'remove' },
-                    { label: 'Disable Potfile', key: 'potfileDisable' },
-                    { label: 'Disable HW Monitor', key: 'hwmonDisable' },
+                    { label: t('config_opt_optimized'), key: 'optimizedKernel' },
+                    { label: t('config_opt_remove'), key: 'remove' },
+                    { label: t('config_opt_potfile'), key: 'potfileDisable' },
+                    { label: t('config_opt_hwmon'), key: 'hwmonDisable' },
                   ].map((opt: any) => (
                     <label key={opt.key} className="flex items-center gap-3 cursor-pointer group p-2 rounded hover:bg-slate-800/50">
                       <input 
@@ -582,17 +660,17 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
         <div className="bg-slate-900 border border-slate-800 p-6 rounded-xl shadow-sm">
            <div className="flex items-center justify-between mb-4">
              <h3 className="text-indigo-400 font-mono text-xs uppercase tracking-wider flex items-center gap-2 font-bold">
-                <Cpu size={14} /> Hardware Selection
+                <Cpu size={14} /> {t('config_hardware_title')}
              </h3>
              <button onClick={fetchDevices} className="text-xs text-slate-500 hover:text-white flex items-center gap-1 transition-colors">
-               {scanningDevices ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} Refresh
+               {scanningDevices ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} {t('config_refresh')}
              </button>
            </div>
            
            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {availableDevices.length === 0 ? (
                 <div className="col-span-2 text-center text-xs text-slate-500 py-4 border border-dashed border-slate-800 rounded">
-                   {scanningDevices ? 'Scanning for OpenCL/CUDA devices...' : 'No devices found or scan failed.'}
+                   {scanningDevices ? t('config_scanning_devices') : t('config_no_devices')}
                 </div>
               ) : (
                 availableDevices.map(device => {
@@ -626,7 +704,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
             className="w-full p-4 flex items-center justify-between bg-slate-800/50 hover:bg-slate-800 transition-colors"
           >
             <h3 className="text-indigo-400 font-mono text-xs uppercase tracking-wider flex items-center gap-2 font-bold">
-              <Layers size={14} /> Advanced Options
+              <Layers size={14} /> {t('config_advanced_title')}
             </h3>
             {showAdvanced ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
           </button>
@@ -635,15 +713,15 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
             <div className="p-6 space-y-6 border-t border-slate-800">
                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                   <div>
-                    <label className="block text-xs font-bold text-slate-500 mb-2">Skip Keyspace (-s)</label>
+                    <label className="block text-xs font-bold text-slate-500 mb-2">{t('config_skip')}</label>
                     <input type="number" value={config.skip} onChange={e => setConfig({...config, skip: parseInt(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-white" placeholder="0" />
                   </div>
                   <div>
-                    <label className="block text-xs font-bold text-slate-500 mb-2">Bitmap Max</label>
+                    <label className="block text-xs font-bold text-slate-500 mb-2">{t('config_bitmap')}</label>
                     <input type="number" value={config.bitmapMax} onChange={e => setConfig({...config, bitmapMax: parseInt(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-white" />
                   </div>
                   <div>
-                    <label className="block text-xs font-bold text-slate-500 mb-2">Spin Damp</label>
+                    <label className="block text-xs font-bold text-slate-500 mb-2">{t('config_spin')}</label>
                     <input type="number" value={config.spinDamp} onChange={e => setConfig({...config, spinDamp: parseInt(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-white" />
                   </div>
                </div>
@@ -678,14 +756,14 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
         <div className="bg-slate-900 px-4 py-3 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Terminal size={16} className="text-slate-400" />
-            <span className="font-mono text-xs text-slate-300 font-bold">Command Preview</span>
+            <span className="font-mono text-xs text-slate-300 font-bold">{t('config_cmd_preview')}</span>
           </div>
           <button 
              onClick={() => setIsManualMode(!isManualMode)}
              className={`text-[10px] uppercase font-bold px-2 py-1 rounded border transition-colors flex items-center gap-1 ${isManualMode ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30' : 'bg-slate-800 text-slate-400 border-slate-700'}`}
           >
             {isManualMode ? <Edit3 size={10} /> : <Lock size={10} />}
-            {isManualMode ? 'Manual Mode' : 'Auto-Gen'}
+            {isManualMode ? t('config_manual_mode') : t('config_auto_gen')}
           </button>
         </div>
         <div className="relative bg-black/40 min-h-[150px]">
@@ -700,10 +778,10 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
         <div className="bg-slate-900 p-4 border-t border-slate-800 flex flex-col gap-3">
            <div className="flex gap-3">
              <button onClick={handleCopy} className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2">
-               <Copy size={16} /> Copy
+               <Copy size={16} /> {t('config_btn_copy')}
              </button>
              <button onClick={handleRun} className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white py-2.5 rounded-lg text-sm font-medium transition-colors shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-2">
-               <Play size={16} /> {isManualMode ? 'Run Custom' : 'Run Auto'}
+               <Play size={16} /> {isManualMode ? t('config_btn_run_custom') : t('config_btn_run_auto')}
              </button>
            </div>
            
@@ -712,7 +790,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
               onClick={onQueue}
               className="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:text-white text-slate-300 py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
             >
-               <ListPlus size={16} /> Add to Queue
+               <ListPlus size={16} /> {t('config_btn_queue')}
              </button>
            )}
         </div>

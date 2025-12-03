@@ -3,7 +3,8 @@ export enum SessionStatus {
   RUNNING = 'RUNNING',
   PAUSED = 'PAUSED',
   COMPLETED = 'COMPLETED',
-  ERROR = 'ERROR'
+  ERROR = 'ERROR',
+  STOPPED = 'STOPPED'
 }
 
 export interface GpuDevice {
@@ -38,7 +39,6 @@ export interface SessionStats {
   hashrate: number;
   estimatedTimeRemaining: string;
   startTime: number;
-  // NEW: Store cracks specific to this session
   recoveredHashes: RecoveredHash[];
 }
 
@@ -104,6 +104,12 @@ export interface HashcatConfig {
   mask: string;
   maskFile: string; 
   
+  // Increment Settings
+  increment: boolean; // --increment (-i)
+  incrementMin: number; // --increment-min
+  incrementMax: number; // --increment-max
+  incrementInverse: boolean; // --increment-inverse
+
   // Flags & Options
   optimizedKernel: boolean; // -O
   workloadProfile: number; // -w

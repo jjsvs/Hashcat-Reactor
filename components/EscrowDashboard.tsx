@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { EscrowJob, EscrowAlgo } from '../types';
-import { getEscrowJobs, getAlgorithms, submitFoundHash } from '../services/geminiService';
-import { RefreshCw, Download, Search, UploadCloud, AlertTriangle, DollarSign, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Calendar, FileText, Filter, X, Loader2, Settings } from 'lucide-react';
+import { getEscrowJobs, getAlgorithms } from '../services/geminiService';
+import { RefreshCw, Download, Search, UploadCloud, AlertTriangle, DollarSign, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Calendar, FileText, Filter, X, Loader2, Settings, Wallet } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 interface EscrowDashboardProps {
   apiKey: string;
@@ -11,10 +12,15 @@ interface EscrowDashboardProps {
 }
 
 const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, initialSubmissionData, initialAlgoId }) => {
+  const { t } = useTranslation();
   const [jobs, setJobs] = useState<EscrowJob[]>([]);
   const [algos, setAlgos] = useState<EscrowAlgo[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  
+  // Balance State
+  const [balances, setBalances] = useState<{ currency: string, amount: string, usd: string }[]>([]);
+  const [loadingBalance, setLoadingBalance] = useState(false);
   
   // Filters & Pagination (View Only)
   const [filterAlgo, setFilterAlgo] = useState('');
@@ -81,10 +87,51 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
     }
   }, [initialAlgoId, algos]);
 
+  // --- BALANCE FEATURE ---
+  const fetchBalance = async () => {
+      if (!apiKey) return;
+      setLoadingBalance(true);
+      try {
+          // 1. Fetch Balances 
+          const balanceUrl = `https://hashes.com/en/api/balance?key=${apiKey}`;
+          const balanceRes = await fetch(`http://localhost:3001/api/escrow/proxy?url=${encodeURIComponent(balanceUrl)}`);
+          if(!balanceRes.ok) throw new Error("Failed to fetch balance");
+          const balanceData = await balanceRes.json();
+          if(!balanceData.success) throw new Error(balanceData.message || "Balance API error");
+
+          delete balanceData.success;
+          
+          // 2. Fetch Conversion Rates
+          const convUrl = `https://hashes.com/en/api/conversion`;
+          const convRes = await fetch(`http://localhost:3001/api/escrow/proxy?url=${encodeURIComponent(convUrl)}`);
+          const convData = convRes.ok ? await convRes.json() : {};
+
+          // 3. Combine Data
+          const formatted = Object.entries(balanceData).map(([currency, amount]) => {
+              const amt = parseFloat(amount as string);
+              if (amt <= 0) return null;
+              
+              let usdVal = "0.00";
+              if (convData && convData[currency]) {
+                  usdVal = (amt * parseFloat(convData[currency])).toFixed(2);
+              }
+              return { currency, amount: amt.toFixed(7), usd: usdVal };
+          }).filter(Boolean) as { currency: string, amount: string, usd: string }[];
+
+          setBalances(formatted);
+
+      } catch (e) {
+          console.error("Balance fetch error:", e);
+      } finally {
+          setLoadingBalance(false);
+      }
+  };
+
   const fetchJobs = async () => {
     if (!apiKey) return;
     setLoading(true);
     setError(null);
+    fetchBalance(); 
     try {
       const data = await getEscrowJobs(apiKey);
       setJobs(data);
@@ -125,6 +172,10 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
       comparison = a.leftHashes - b.leftHashes;
     } else if (key === 'createdAt') {
        comparison = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+    } else if (key === 'maxCracksNeeded') {
+       const valA = (a as any).maxCracksNeeded || 0;
+       const valB = (b as any).maxCracksNeeded || 0;
+       comparison = valA - valB;
     }
 
     return direction === 'asc' ? comparison : -comparison;
@@ -144,63 +195,42 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
   // --- Helper: Delay ---
   const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-  // --- Helper: Robust Fetch with Retry & Backoff ---
-  const fetchWithRetry = async (fileUrl: string, jobId: number, attempt = 1): Promise<string | null> => {
+  // --- FETCH ---
+  const fetchViaProxy = async (fileUrl: string, jobId: number, attempt = 1): Promise<string | null> => {
       const maxAttempts = 3;
-      
       try {
-          // Use 'allorigins' as primary proxy
-          const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(fileUrl)}&disableCache=${Date.now()}`;
-          
+          // Use our LOCAL server proxy 
+          const proxyUrl = `http://localhost:3001/api/escrow/proxy?url=${encodeURIComponent(fileUrl)}`;
           const response = await fetch(proxyUrl);
           
-          // Handle Rate Limiting specifically
-          if (response.status === 429) {
-              throw new Error("RATE_LIMIT");
-          }
-
-          if (!response.ok) {
-              throw new Error(`HTTP_${response.status}`);
-          }
+          if (!response.ok) throw new Error(`HTTP_${response.status}`);
 
           const text = await response.text();
-          
-          // Validation: Check for HTML (Proxy error pages usually return HTML)
+          // Hashes.com sometimes returns HTML error pages
           if (text.trim().toLowerCase().startsWith('<!doctype') || text.includes('<html')) {
              throw new Error("INVALID_CONTENT_HTML");
           }
-          
           return text;
-
       } catch (err: any) {
           if (attempt < maxAttempts) {
-              let waitTime = 2000 * attempt; // Linear backoff: 2s, 4s, 6s
-              
-              if (err.message === "RATE_LIMIT") {
-                  waitTime = 5000 * attempt; // Aggressive backoff for 429s: 5s, 10s
-              }
-
+              let waitTime = 2000 * attempt; 
               console.warn(`Job #${jobId} failed (Attempt ${attempt}). Retrying in ${waitTime}ms... Error: ${err.message}`);
               await delay(waitTime);
-              return fetchWithRetry(fileUrl, jobId, attempt + 1);
+              return fetchViaProxy(fileUrl, jobId, attempt + 1);
           }
-          throw err; // Throw final error after max attempts
+          throw err;
       }
   };
 
-  // --- REVISED MASS DOWNLOAD LOGIC ---
+  // --- MASS DOWNLOAD LOGIC ---
   const startMassDownload = async () => {
-    // 1. Filter Jobs based on Modal Inputs
     const targetJobs = jobs.filter(j => {
         const meetsAlgo = dlAlgo ? j.algorithmId.toString() === dlAlgo : true;
         const meetsPrice = dlMinPrice ? parseFloat(j.pricePerHashUsd) >= parseFloat(dlMinPrice) : true;
         return meetsAlgo && meetsPrice && j.leftList;
     });
 
-    if (targetJobs.length === 0) {
-        alert("No jobs match your criteria.");
-        return;
-    }
+    if (targetJobs.length === 0) { alert("No jobs match your criteria."); return; }
     
     setDownloading(true);
     setDownloadProgress({ current: 0, total: targetJobs.length, found: 0 });
@@ -213,7 +243,6 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
         const job = targetJobs[i];
         setDownloadProgress(prev => ({ ...prev!, current: i + 1 }));
         
-        // Prepare URL
         let fileUrl = job.leftList;
         if (!fileUrl.startsWith('http')) {
              if (!fileUrl.startsWith('/')) fileUrl = '/' + fileUrl;
@@ -223,32 +252,17 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
         setDownloadLogs(prev => [...prev, `Job #${job.id}: Fetching...`]);
 
         try {
-          // Throttling: Wait 1.5 seconds between EVERY file to prevent 429s
-          await delay(1500); 
-
-          const text = await fetchWithRetry(fileUrl, job.id);
-
+          await delay(500); 
+          const text = await fetchViaProxy(fileUrl, job.id);
           if (text && text.trim()) {
             combinedContent += text.trim() + '\n';
             setDownloadProgress(prev => ({ ...prev!, found: prev!.found + 1 }));
-            setDownloadLogs(prev => {
-                const newLogs = [...prev];
-                newLogs[newLogs.length - 1] = `✅ Job #${job.id}: Success.`;
-                return newLogs;
-            });
+            setDownloadLogs(prev => { const newLogs = [...prev]; newLogs[newLogs.length - 1] = `✅ Job #${job.id}: Success.`; return newLogs; });
           } else {
-            setDownloadLogs(prev => {
-                const newLogs = [...prev];
-                newLogs[newLogs.length - 1] = `⚠️ Job #${job.id}: File empty.`;
-                return newLogs;
-            });
+            setDownloadLogs(prev => { const newLogs = [...prev]; newLogs[newLogs.length - 1] = `⚠️ Job #${job.id}: File empty.`; return newLogs; });
           }
         } catch (err: any) {
-          setDownloadLogs(prev => {
-              const newLogs = [...prev];
-              newLogs[newLogs.length - 1] = `❌ Job #${job.id}: Failed after 3 retries (${err.message}).`;
-              return newLogs;
-          });
+          setDownloadLogs(prev => { const newLogs = [...prev]; newLogs[newLogs.length - 1] = `❌ Job #${job.id}: Failed (${err.message}).`; return newLogs; });
         }
       }
 
@@ -257,13 +271,11 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
         return;
       }
 
-      // 2. Construct Filename: Algorithm_Date.txt
       const algoObj = algos.find(a => a.id.toString() === dlAlgo);
       const algoName = algoObj ? algoObj.algorithmName.replace(/[^a-z0-9]/gi, '_') : 'Mixed_Algorithms';
       const dateStr = new Date().toISOString().slice(0,10);
       const filename = `${algoName}_${dateStr}.txt`;
 
-      // 3. Download Blob
       const blob = new Blob([combinedContent], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -284,16 +296,43 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
     }
   };
 
+  // --- SUBMIT HANDLER ---
   const handleSubmit = async () => {
     if((!submissionContent && !submissionFile) || !submissionAlgo || !apiKey) return;
     
     setSubmitting(true);
     try {
-      const content = submissionFile || submissionContent;
-      const res = await submitFoundHash(apiKey, parseInt(submissionAlgo), content);
-      alert(`Submission Successful!\nSuccess: ${res.success}`);
-      setSubmissionContent('');
-      setSubmissionFile(null);
+      const formData = new FormData();
+      formData.append('key', apiKey);
+      formData.append('algo', submissionAlgo);
+      
+      if (submissionFile) {
+          formData.append('userfile', submissionFile);
+      } else {
+          const blob = new Blob([submissionContent], { type: 'text/plain' });
+          formData.append('userfile', blob, 'founds.txt');
+      }
+
+      const response = await fetch('http://localhost:3001/api/escrow/proxy', {
+          method: 'POST',
+          body: formData, 
+      });
+
+      if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`Upload failed: ${text}`);
+      }
+
+      const res = await response.json();
+      
+      if (res.success === true) {
+          alert(`Submission Successful!\nHashes.com Response: Success`);
+          setSubmissionContent('');
+          setSubmissionFile(null);
+      } else {
+           throw new Error(res.message || "Unknown error from Hashes.com");
+      }
+
     } catch (e: any) {
       alert(`Error submitting: ${e.message}`);
     } finally {
@@ -317,7 +356,7 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
       {/* Header & Controls */}
       <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl flex flex-col md:flex-row gap-4 items-end md:items-center justify-between shadow-sm">
         <div className="flex-1 w-full md:w-auto">
-          <label className="text-xs text-slate-500 uppercase font-bold tracking-wider">Hashes.com API Key</label>
+          <label className="text-xs text-slate-500 uppercase font-bold tracking-wider">{t('escrow_api_label')}</label>
           <div className="flex gap-2 mt-1">
             <input 
               type="password" 
@@ -332,15 +371,28 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
               className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded flex items-center gap-2 disabled:opacity-50 transition-colors shadow-lg shadow-indigo-900/20"
             >
               <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
-              Load Jobs
+              {t('escrow_btn_load')}
             </button>
           </div>
+
+          {/* Balance Display */}
+          {balances.length > 0 && (
+            <div className="mt-2 flex flex-col gap-1">
+              {balances.map(b => (
+                <div key={b.currency} className="text-xs font-mono text-slate-400 flex items-center gap-2">
+                   <div className="w-1.5 h-1.5 rounded-full bg-emerald-500"></div>
+                   <span>{b.amount} {b.currency}</span>
+                   <span className="text-slate-600">(${b.usd})</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
         
         <div className="flex gap-3 flex-wrap items-end">
            {/* View Filters */}
            <div>
-              <label className="text-xs text-slate-500 uppercase font-bold">View Min USD</label>
+              <label className="text-xs text-slate-500 uppercase font-bold">{t('escrow_view_min_usd')}</label>
               <div className="relative mt-1">
                 <DollarSign size={14} className="absolute left-2.5 top-2.5 text-slate-500"/>
                 <input 
@@ -353,7 +405,7 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
               </div>
            </div>
            <div>
-              <label className="text-xs text-slate-500 uppercase font-bold">View Algo Filter</label>
+              <label className="text-xs text-slate-500 uppercase font-bold">{t('escrow_view_algo')}</label>
               <div className="relative mt-1">
                 <Filter size={14} className="absolute left-3 top-2.5 text-slate-500"/>
                 <select
@@ -376,7 +428,7 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
              className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded flex items-center gap-2 transition-colors h-10 disabled:opacity-50 font-medium shadow-lg shadow-emerald-900/20"
            >
              <Settings size={16} />
-             Mass Download
+             {t('escrow_btn_mass_dl')}
            </button>
         </div>
       </div>
@@ -396,22 +448,28 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
             <thead>
               <tr className="bg-slate-950 text-slate-400 uppercase text-xs font-semibold tracking-wider select-none">
                 <th className="p-4 cursor-pointer hover:text-slate-200" onClick={() => handleSort('createdAt')}>
-                   Created {sortConfig.key === 'createdAt' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
+                   {t('escrow_col_created')} {sortConfig.key === 'createdAt' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
                 </th>
-                <th className="p-4">Algorithm</th>
-                <th className="p-4 text-right">Total</th>
+                <th className="p-4">{t('escrow_col_algo')}</th>
+                <th className="p-4 text-right">{t('escrow_col_total')}</th>
+                
+                <th className="p-4 text-right cursor-pointer hover:text-slate-200" onClick={() => handleSort('maxCracksNeeded')}>
+                   <div className="flex items-center justify-end gap-1">
+                      {t('escrow_col_max')} {sortConfig.key === 'maxCracksNeeded' && (sortConfig.direction === 'asc' ? <ChevronUp size={14}/> : <ChevronDown size={14}/>)}
+                   </div>
+                </th>
                 <th className="p-4 text-right cursor-pointer hover:text-emerald-400 transition-colors" onClick={() => handleSort('pricePerHashUsd')}>
                   <div className="flex items-center justify-end gap-1">
-                     Price {sortConfig.key === 'pricePerHashUsd' && (sortConfig.direction === 'asc' ? <ChevronUp size={14}/> : <ChevronDown size={14}/>)}
+                     {t('escrow_col_price')} {sortConfig.key === 'pricePerHashUsd' && (sortConfig.direction === 'asc' ? <ChevronUp size={14}/> : <ChevronDown size={14}/>)}
                   </div>
                 </th>
-                <th className="p-4 text-right">Progress</th>
+                <th className="p-4 text-right">{t('escrow_col_progress')}</th>
                 <th className="p-4 text-right cursor-pointer hover:text-slate-200 transition-colors" onClick={() => handleSort('leftHashes')}>
                   <div className="flex items-center justify-end gap-1">
-                    Remaining {sortConfig.key === 'leftHashes' && (sortConfig.direction === 'asc' ? <ChevronUp size={14}/> : <ChevronDown size={14}/>)}
+                    {t('escrow_col_remaining')} {sortConfig.key === 'leftHashes' && (sortConfig.direction === 'asc' ? <ChevronUp size={14}/> : <ChevronDown size={14}/>)}
                   </div>
                 </th>
-                <th className="p-4 text-center">Files</th>
+                <th className="p-4 text-center">{t('escrow_col_files')}</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800">
@@ -428,6 +486,10 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
                     <div className="text-xs text-slate-600 font-mono">ID: {job.algorithmId}</div>
                   </td>
                   <td className="p-4 text-right font-mono text-slate-400">{job.totalHashes.toLocaleString()}</td>
+                 
+                  <td className="p-4 text-right font-mono text-slate-400">
+                    {(job as any).maxCracksNeeded ? (job as any).maxCracksNeeded.toLocaleString() : 'N/A'}
+                  </td>
                   <td className="p-4 text-right">
                      <div className="text-emerald-400 font-mono font-bold">${parseFloat(job.pricePerHashUsd).toFixed(4)}</div>
                      <div className="text-xs text-slate-500 font-mono">{parseFloat(job.pricePerHash).toFixed(8)} {job.currency}</div>
@@ -453,7 +515,7 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
               ))}
               {jobs.length === 0 && !loading && !error && (
                 <tr>
-                  <td colSpan={7} className="p-12 text-center text-slate-500 flex flex-col items-center justify-center gap-2">
+                  <td colSpan={8} className="p-12 text-center text-slate-500 flex flex-col items-center justify-center gap-2">
                     <Search size={32} className="opacity-20" />
                     <span>No jobs loaded. Enter API key and fetch to see available escrow jobs.</span>
                   </td>
@@ -509,26 +571,26 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
       <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
         <div className="bg-slate-950/50 p-4 border-b border-slate-800 flex items-center gap-2">
           <UploadCloud size={18} className="text-emerald-400"/>
-          <h3 className="text-sm font-bold text-slate-200">Submit Found Hashes</h3>
+          <h3 className="text-sm font-bold text-slate-200">{t('escrow_submit_title')}</h3>
         </div>
         <div className="p-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="space-y-4">
                 <div className="p-4 bg-slate-950 rounded-lg border border-slate-800 text-xs text-slate-400 leading-relaxed">
-                    <strong className="text-slate-300 block mb-2">Instructions:</strong>
-                    1. Select the algorithm of the hashes.<br/>
-                    2. Paste hashes in <code className="text-indigo-400">hash:plain</code> format OR upload a .txt file.<br/>
-                    3. Click Upload to submit to Hashes.com Escrow.<br/>
+                    <strong className="text-slate-300 block mb-2">{t('escrow_instructions_title')}</strong>
+                    {t('escrow_instructions_1')}<br/>
+                    {t('escrow_instructions_2')}<br/>
+                    {t('escrow_instructions_3')}<br/>
                     <br/>
-                    <span className="text-emerald-500">Tip:</span> You can automatically populate this from the Dashboard "Recovered" tab.
+                    <span className="text-emerald-500">{t('escrow_tip')}</span>
                 </div>
                 
                 <div className="relative" ref={algoListRef}>
-                  <label className="block text-xs font-bold text-slate-500 mb-2 uppercase">Algorithm</label>
+                  <label className="block text-xs font-bold text-slate-500 mb-2 uppercase">{t('escrow_label_algo')}</label>
                   <div className="relative">
                     <input
                       type="text"
                       className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-white outline-none focus:border-indigo-500 pr-8"
-                      placeholder="Search Algorithm..."
+                      placeholder={t('escrow_search_placeholder')}
                       value={algoSearch}
                       onChange={(e) => {
                         setAlgoSearch(e.target.value);
@@ -581,19 +643,19 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
                     className="w-full bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-3 rounded-lg font-medium flex justify-center items-center gap-2 disabled:opacity-50 shadow-lg shadow-emerald-900/20 transition-all"
                 >
                    {submitting ? <RefreshCw className="animate-spin" size={18} /> : <UploadCloud size={18} />}
-                   Upload to Escrow
+                   {t('escrow_btn_upload')}
                 </button>
             </div>
             
             <div className="lg:col-span-2 space-y-4">
                 <div>
                   <div className="flex justify-between mb-2">
-                    <label className="text-xs font-bold text-slate-500 uppercase">Hash List (Text)</label>
+                    <label className="text-xs font-bold text-slate-500 uppercase">{t('escrow_label_list')}</label>
                     <label className="text-xs font-bold text-indigo-400 cursor-pointer hover:text-indigo-300 flex items-center gap-1">
                       <input type="file" className="hidden" onChange={(e) => {
                         if(e.target.files?.[0]) setSubmissionFile(e.target.files[0]);
                       }} accept=".txt" />
-                      <FileText size={12} /> {submissionFile ? submissionFile.name : 'Load from .txt file'}
+                      <FileText size={12} /> {submissionFile ? submissionFile.name : t('escrow_load_file')}
                     </label>
                   </div>
                   <textarea
@@ -605,8 +667,8 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
                   />
                   {submissionFile && (
                     <div className="mt-2 text-xs text-emerald-400 flex items-center gap-2">
-                      <FileText size={14} /> File loaded: {submissionFile.name} (Textarea disabled)
-                      <button onClick={() => setSubmissionFile(null)} className="text-red-400 hover:underline ml-2">Clear</button>
+                      <FileText size={14} /> {t('escrow_file_loaded', { name: submissionFile.name })}
+                      <button onClick={() => setSubmissionFile(null)} className="text-red-400 hover:underline ml-2">{t('escrow_btn_clear')}</button>
                     </div>
                   )}
                 </div>
@@ -621,7 +683,7 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
                 <div className="p-4 bg-slate-950 border-b border-slate-800 flex justify-between items-center shrink-0">
                     <h3 className="text-white font-bold flex items-center gap-2">
                         <Download size={18} className="text-emerald-500"/>
-                        Mass Download Wizard
+                        {t('escrow_modal_title')}
                     </h3>
                     {!downloading && (
                         <button onClick={() => setShowDownloadModal(false)} className="text-slate-500 hover:text-white">
@@ -633,7 +695,7 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
                 <div className="p-6 space-y-5 overflow-y-auto">
                     {/* Algo Selector */}
                     <div>
-                        <label className="block text-xs text-slate-400 uppercase font-bold mb-2">1. Select Algorithm Type</label>
+                        <label className="block text-xs text-slate-400 uppercase font-bold mb-2">{t('escrow_modal_step1')}</label>
                         <select 
                             value={dlAlgo}
                             onChange={e => setDlAlgo(e.target.value)}
@@ -649,7 +711,7 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
 
                     {/* Price Selector */}
                     <div>
-                        <label className="block text-xs text-slate-400 uppercase font-bold mb-2">2. Minimum Price (USD)</label>
+                        <label className="block text-xs text-slate-400 uppercase font-bold mb-2">{t('escrow_modal_step2')}</label>
                         <div className="relative">
                             <DollarSign size={14} className="absolute left-3 top-3 text-slate-500"/>
                             <input 
@@ -666,11 +728,11 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
                     {/* Summary */}
                     <div className="bg-slate-800/50 p-3 rounded border border-slate-700 text-sm text-slate-300">
                         <div className="flex justify-between mb-1">
-                            <span>Files to fetch:</span>
+                            <span>{t('escrow_modal_summary')}</span>
                             <span className="font-bold text-white">{calculateDownloadableCount()}</span>
                         </div>
                         <div className="text-xs text-slate-500 leading-tight">
-                            This will combine all matching files into a single <span className="font-mono text-emerald-400">.txt</span> file: <br/>
+                            {t('escrow_modal_desc')} <br/>
                             <code>{dlAlgo ? (algos.find(a=>a.id.toString()===dlAlgo)?.algorithmName.replace(/[^a-z0-9]/gi, '_')) : 'algo'}_{new Date().toISOString().slice(0,10)}.txt</code>
                         </div>
                     </div>
@@ -710,7 +772,7 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
                         className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-bold py-3 rounded transition-all flex justify-center items-center gap-2"
                     >
                         {downloading ? <Loader2 className="animate-spin" size={18}/> : <Download size={18}/>}
-                        {downloading ? 'Downloading & Combining...' : 'Download & Combine'}
+                        {downloading ? t('escrow_modal_btn_dling') : t('escrow_modal_btn_dl')}
                     </button>
                 </div>
             </div>
