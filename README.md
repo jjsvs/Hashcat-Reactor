@@ -48,7 +48,7 @@ This project is designed to be built for Windows.
 
 1.  **Clone the repository**:
     ```bash
-    git clone [<repository-url>](https://github.com/jjsvs/Hashcat-Reactor.git)
+    git clone https://github.com/jjsvs/Hashcat-Reactor.git
     cd hashcat-reactor
     ```
 
