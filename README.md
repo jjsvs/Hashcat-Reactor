@@ -37,12 +37,12 @@
 
 | Remote Access | Hash Extractor |
 |:---:|:---:|
-| ![Remote Access Screenshot](screenshots/remote_access.jpg) | ![Hash Extractor Screenshot](screenshots/hash_extractor.jpg) |
+| ![Remote Access Screenshot](screenshots/remote_access.png) | ![Hash Extractor Screenshot](screenshots/hash_extractor.png) |
 | *Secure remote tunneling via Zrok* | *Extract hashes from files* |
 
 | Auto-Upload Settings | |
 |:---:|:---:|
-| ![Auto Upload Screenshot](screenshots/auto_uploads.jpg) | |
+| ![Auto Upload Screenshot](screenshots/auto_uploads.png) | |
 | *Automated submission to Escrow* | |
 
 ---
