@@ -289,6 +289,14 @@ const Insights: React.FC<InsightsProps> = ({
     });
 
     const workerRef = useRef<Worker | null>(null);
+    
+    // Use a Ref to track the current scope inside the async worker callback
+    // This prevents race conditions where 'All' mode overwrites 'Snapshot' mode
+    const scopeRef = useRef(insightScope);
+
+    useEffect(() => {
+        scopeRef.current = insightScope;
+    }, [insightScope]);
 
     // --- Computed Data ---
     const hashesToAnalyze = useMemo(() => {
@@ -313,6 +321,9 @@ const Insights: React.FC<InsightsProps> = ({
         const blob = new Blob([WORKER_CODE], { type: 'application/javascript' });
         workerRef.current = new Worker(URL.createObjectURL(blob));
         workerRef.current.onmessage = (e) => {
+            // CRITICAL FIX: Ignore worker results if we are currently viewing a snapshot
+            if (scopeRef.current === 'historical_snapshot') return;
+            
             setInsights(e.data);
             setIsAnalyzing(false);
         };
@@ -502,9 +513,19 @@ const Insights: React.FC<InsightsProps> = ({
             addLog('general', 'No snapshot data available for this session.', 'WARN');
             return;
         }
+        
+        // Stop any pending analysis spinners
+        setIsAnalyzing(false);
+        
+        // Ensure we switch scope first, then load data safely
+        // Merging with INITIAL_INSIGHTS prevents crashes if the saved snapshot is incomplete
         setInsightScope('historical_snapshot');
-        setInsights(session.analysis);
+        setInsights({ ...INITIAL_INSIGHTS, ...session.analysis });
+        
         addLog('general', `Loaded snapshot for session: ${session.date}`, 'INFO');
+        
+        // Scroll to top to see the data
+        window.scrollTo({ top: 0, behavior: 'smooth' });
     };
 
     const toggleSessionGraph = (sessionId: string) => {

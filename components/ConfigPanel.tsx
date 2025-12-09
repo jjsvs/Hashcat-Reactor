@@ -26,6 +26,15 @@ interface Resources {
   masks: ResourceFile[];
 }
 
+// Helper to determine backend URL
+const getSocketUrl = () => {
+    const host = window.location.hostname;
+    if (host.includes('zrok.io') || window.location.port === '3001') {
+        return window.location.origin;
+    }
+    return 'http://localhost:3001';
+};
+
 const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, onQueue }) => {
   const { t } = useTranslation();
   
@@ -42,6 +51,9 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
   const [resources, setResources] = useState<Resources>({ wordlists: [], rules: [], masks: [] });
   const [scanningResources, setScanningResources] = useState(false);
   
+  // Upload State for Remote Clients
+  const [uploadingField, setUploadingField] = useState<string | null>(null);
+
   // Input Modes (File System vs Library Dropdown)
   const [inputModes, setInputModes] = useState({
     wordlist: 'file', // 'file' or 'library'
@@ -53,7 +65,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
   const fetchDevices = async () => {
     setScanningDevices(true);
     try {
-      const res = await fetch('http://localhost:3001/api/system/devices', { method: 'POST' });
+      const res = await fetch(`${getSocketUrl()}/api/system/devices`, { method: 'POST' });
       const data = await res.json();
       if (data.devices) setAvailableDevices(data.devices);
     } catch (e) { console.error("Failed to fetch devices", e); }
@@ -68,7 +80,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
     if (!config.resourcesPath) return;
     setScanningResources(true);
     try {
-      const res = await fetch('http://localhost:3001/api/fs/scan', {
+      const res = await fetch(`${getSocketUrl()}/api/fs/scan`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ dirPath: config.resourcesPath })
@@ -103,13 +115,23 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
     input.type = 'file';
     input.onchange = async (e: any) => {
       const file = e.target.files[0];
-      if (file && (file as any).path) {
+      if (file) {
         setDetecting(true);
         try {
-          const res = await fetch('http://localhost:3001/api/identify', {
+          // If remote, upload first
+          let targetPath = (file as any).path;
+          if (!targetPath) {
+             const formData = new FormData();
+             formData.append('file', file);
+             const upRes = await fetch(`${getSocketUrl()}/api/upload`, { method: 'POST', body: formData });
+             const upData = await upRes.json();
+             targetPath = upData.path;
+          }
+
+          const res = await fetch(`${getSocketUrl()}/api/identify`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ targetPath: (file as any).path })
+            body: JSON.stringify({ targetPath })
           });
           const data = await res.json();
           if (data.modes && data.modes.length > 0) {
@@ -124,8 +146,6 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
         } finally {
           setDetecting(false);
         }
-      } else {
-        alert('Please run in Electron to use Auto-Detect feature.');
       }
     };
     input.click();
@@ -137,7 +157,6 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
     parts.push(`-a ${config.attackMode}`);
     parts.push(`-w ${config.workloadProfile}`);
     
-    // Devices Flag
     if (config.devices) parts.push(`-d ${config.devices}`);
 
     if (config.optimizedKernel) parts.push('-O');
@@ -159,25 +178,19 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
     if (config.scryptTmto !== 0) parts.push(`--scrypt-tmto=${config.scryptTmto}`);
     if (config.segmentSize !== 0) parts.push(`--segment-size=${config.segmentSize}`);
 
-    // --- INCREMENT FLAGS ---
-    // These enable variable length attacks (e.g. 1 to 8 characters)
     if (config.increment) {
         parts.push('--increment');
         if (config.incrementMin) parts.push(`--increment-min=${config.incrementMin}`);
         if (config.incrementMax) parts.push(`--increment-max=${config.incrementMax}`);
-        // Adds support for Reverse Increment (Right-to-Left)
         if (config.incrementInverse) parts.push('--increment-inverse');
     }
 
-    // Use targetPath from config if available
     parts.push(config.targetPath || '[target]');
 
     const mode = config.attackMode;
     const dict = config.wordlistPath || '[wordlist_path]';
-    
     const mask = config.maskFile || config.mask; 
 
-    // Logic Block for Attack Modes
     if (mode === 0) {
       parts.push(dict);
       if (config.rulePath) parts.push('-r', config.rulePath);
@@ -227,14 +240,36 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
     input.type = 'file';
     if (accept) input.accept = accept;
     
-    input.onchange = (e: any) => {
+    input.onchange = async (e: any) => {
       const file = e.target.files[0];
       if (file) {
-        const filePath = (file as any).path;
-        if (filePath) {
-          setConfig({ ...config, [field]: filePath });
+        const directPath = (file as any).path;
+        
+        if (directPath) {
+          // Electron Mode: We have the path
+          setConfig({ ...config, [field]: directPath });
         } else {
-          alert("Could not detect file path. Ensure you are using the Electron executable.");
+          // Browser/Remote Mode: Must upload first
+          setUploadingField(field as string);
+          try {
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            const res = await fetch(`${getSocketUrl()}/api/upload`, {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (!res.ok) throw new Error("Upload failed");
+            
+            const data = await res.json();
+            setConfig({ ...config, [field]: data.path });
+          } catch (err) {
+            console.error("Auto-upload failed", err);
+            alert("Failed to upload file to remote server.");
+          } finally {
+            setUploadingField(null);
+          }
         }
       }
     };
@@ -250,19 +285,19 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
     input.onchange = (e: any) => {
       const file = e.target.files[0];
       if (file) {
+        // Folders usually require Electron for meaningful path scanning
         const fullPath = (file as any).path;
-        const dirPath = fullPath.substring(0, fullPath.lastIndexOf((window.navigator.userAgent.includes('Win') ? '\\' : '/')));
-        if (dirPath) {
-          setConfig({ ...config, resourcesPath: dirPath });
+        if (fullPath) {
+            const dirPath = fullPath.substring(0, fullPath.lastIndexOf((window.navigator.userAgent.includes('Win') ? '\\' : '/')));
+            setConfig({ ...config, resourcesPath: dirPath || fullPath });
         } else {
-           setConfig({ ...config, resourcesPath: fullPath });
+            alert("Folder selection is only supported in the Desktop application.");
         }
       }
     };
     input.click();
   };
 
-  // Helpers for UI Rendering
   const showWordlistInput = [0, 1, 2, 4, 5, 6, 7, 8, 9].includes(config.attackMode);
   const showMaskInput = [3, 6, 7].includes(config.attackMode);
 
@@ -270,13 +305,12 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-full">
       <div className="lg:col-span-2 space-y-6 overflow-y-auto pr-2 pb-10">
         
-        {/* 1. GENERAL CONFIGURATION & RESOURCE LIBRARY */}
+        {/* 1. GENERAL CONFIGURATION */}
         <div className="bg-slate-900 border border-slate-800 p-6 rounded-xl shadow-sm">
            <h3 className="text-indigo-400 font-mono text-xs uppercase tracking-wider mb-4 flex items-center gap-2 font-bold">
              <Settings size={14} /> {t('config_general_title')}
            </h3>
            
-           {/* Library Path Section */}
            <div className="bg-slate-950/50 rounded-lg p-4 border border-slate-800 mb-6">
               <div className="flex items-center justify-between mb-2">
                  <h4 className="text-xs font-bold text-slate-400 uppercase flex items-center gap-2"><HardDrive size={12}/> {t('config_library_path')}</h4>
@@ -304,7 +338,6 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
            </div>
 
            <div className="grid grid-cols-1 gap-6">
-             {/* Ident & Attack */}
              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
                   <label className="block text-xs font-bold text-slate-500 mb-2 uppercase">{t('config_attack_mode')}</label>
@@ -338,11 +371,9 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                 </div>
              </div>
 
-             {/* Dynamic Resources Inputs based on Attack Mode */}
              <div className="bg-slate-950/50 rounded-lg p-4 border border-slate-800 space-y-4">
                 <h4 className="text-xs font-bold text-slate-400 uppercase mb-2">{t('config_selected_resources')}</h4>
                 
-                {/* Wordlist Input Logic */}
                 {showWordlistInput && (
                   <>
                     <div>
@@ -350,10 +381,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                         <label className="text-xs font-bold text-slate-500">
                           {config.attackMode === 1 ? t('config_wordlist_left') : t('config_wordlist')}
                         </label>
-                        <button 
-                           onClick={() => toggleInputMode('wordlist')} 
-                           className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-white"
-                        >
+                        <button onClick={() => toggleInputMode('wordlist')} className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-white">
                            {inputModes.wordlist === 'library' ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
                            {inputModes.wordlist === 'library' ? t('config_use_library') : t('config_use_file')}
                         </button>
@@ -374,42 +402,26 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                           </div>
                       ) : (
                           <div className="flex gap-2">
-                            <input 
-                              type="text"
-                              value={config.wordlistPath}
-                              onChange={e => setConfig({...config, wordlistPath: e.target.value})}
-                              placeholder="Path to wordlist..."
-                              className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-xs focus:border-indigo-500 outline-none"
-                            />
-                            <button onClick={() => handleFilePick('wordlistPath', '.txt')} className="bg-slate-800 text-slate-400 px-3 rounded-lg hover:bg-slate-700 border border-slate-700 hover:text-white transition-colors">
-                              <FolderOpen size={14} />
+                            <input type="text" value={config.wordlistPath} onChange={e => setConfig({...config, wordlistPath: e.target.value})} placeholder="Path to wordlist..." className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-xs focus:border-indigo-500 outline-none" />
+                            <button onClick={() => handleFilePick('wordlistPath', '.txt')} disabled={uploadingField === 'wordlistPath'} className="bg-slate-800 text-slate-400 px-3 rounded-lg hover:bg-slate-700 border border-slate-700 hover:text-white transition-colors">
+                              {uploadingField === 'wordlistPath' ? <Loader2 size={14} className="animate-spin text-indigo-400" /> : <FolderOpen size={14} />}
                             </button>
                           </div>
                       )}
                     </div>
 
-                    {/* MODE 1 SPECIFIC: SECOND WORDLIST */}
                     {config.attackMode === 1 && (
                       <div>
                          <div className="flex justify-between items-center mb-2">
                             <label className="text-xs font-bold text-slate-500">{t('config_wordlist_right')}</label>
-                            <button 
-                               onClick={() => toggleInputMode('wordlist2')} 
-                               className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-white"
-                            >
+                            <button onClick={() => toggleInputMode('wordlist2')} className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-white">
                                {inputModes.wordlist2 === 'library' ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
                                {inputModes.wordlist2 === 'library' ? t('config_use_library') : t('config_use_file')}
                             </button>
                          </div>
-                         
                          {inputModes.wordlist2 === 'library' ? (
                             <div className="relative">
-                                <select 
-                                    onChange={(e) => setConfig({...config, wordlistPath2: e.target.value})}
-                                    value={config.wordlistPath2 || ''}
-                                    disabled={resources.wordlists.length === 0}
-                                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 text-xs focus:border-indigo-500 outline-none appearance-none disabled:opacity-50"
-                                >
+                                <select onChange={(e) => setConfig({...config, wordlistPath2: e.target.value})} value={config.wordlistPath2 || ''} disabled={resources.wordlists.length === 0} className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 text-xs focus:border-indigo-500 outline-none appearance-none disabled:opacity-50">
                                     <option value="">-- Select from Library --</option>
                                     {resources.wordlists.map((f, i) => <option key={i} value={f.path}>{f.name}</option>)}
                                 </select>
@@ -417,43 +429,27 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                             </div>
                          ) : (
                              <div className="flex gap-2">
-                               <input 
-                                 type="text"
-                                 value={config.wordlistPath2 || ''}
-                                 onChange={e => setConfig({...config, wordlistPath2: e.target.value})}
-                                 placeholder="Path to second wordlist..."
-                                 className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-xs focus:border-indigo-500 outline-none"
-                               />
-                               <button onClick={() => handleFilePick('wordlistPath2', '.txt')} className="bg-slate-800 text-slate-400 px-3 rounded-lg hover:bg-slate-700 border border-slate-700 hover:text-white transition-colors">
-                                 <FolderOpen size={14} />
+                               <input type="text" value={config.wordlistPath2 || ''} onChange={e => setConfig({...config, wordlistPath2: e.target.value})} placeholder="Path to second wordlist..." className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-xs focus:border-indigo-500 outline-none" />
+                               <button onClick={() => handleFilePick('wordlistPath2', '.txt')} disabled={uploadingField === 'wordlistPath2'} className="bg-slate-800 text-slate-400 px-3 rounded-lg hover:bg-slate-700 border border-slate-700 hover:text-white transition-colors">
+                                 {uploadingField === 'wordlistPath2' ? <Loader2 size={14} className="animate-spin text-indigo-400" /> : <FolderOpen size={14} />}
                                </button>
                              </div>
                          )}
                       </div>
                     )}
                     
-                    {/* Rule path logic */}
                     {config.attackMode === 0 && (
                       <div>
                         <div className="flex justify-between items-center mb-2">
                             <label className="text-xs font-bold text-slate-500">{t('config_rule_file')}</label>
-                            <button 
-                               onClick={() => toggleInputMode('rule')} 
-                               className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-white"
-                            >
+                            <button onClick={() => toggleInputMode('rule')} className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-white">
                                {inputModes.rule === 'library' ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
                                {inputModes.rule === 'library' ? t('config_use_library') : t('config_use_file')}
                             </button>
                         </div>
-
                         {inputModes.rule === 'library' ? (
                             <div className="relative">
-                                <select 
-                                    onChange={(e) => setConfig({...config, rulePath: e.target.value})}
-                                    value={config.rulePath}
-                                    disabled={resources.rules.length === 0}
-                                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 text-xs focus:border-indigo-500 outline-none appearance-none disabled:opacity-50"
-                                >
+                                <select onChange={(e) => setConfig({...config, rulePath: e.target.value})} value={config.rulePath} disabled={resources.rules.length === 0} className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 text-xs focus:border-indigo-500 outline-none appearance-none disabled:opacity-50">
                                     <option value="">-- Select from Library --</option>
                                     {resources.rules.map((f, i) => <option key={i} value={f.path}>{f.name}</option>)}
                                 </select>
@@ -461,15 +457,9 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                             </div>
                         ) : (
                             <div className="flex gap-2">
-                              <input 
-                                type="text"
-                                value={config.rulePath}
-                                onChange={e => setConfig({...config, rulePath: e.target.value})}
-                                placeholder="Path to rule file..."
-                                className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-xs focus:border-indigo-500 outline-none"
-                              />
-                              <button onClick={() => handleFilePick('rulePath', '.rule')} className="bg-slate-800 text-slate-400 px-3 rounded-lg hover:bg-slate-700 border border-slate-700 hover:text-white transition-colors">
-                                <FolderOpen size={14} />
+                              <input type="text" value={config.rulePath} onChange={e => setConfig({...config, rulePath: e.target.value})} placeholder="Path to rule file..." className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-xs focus:border-indigo-500 outline-none" />
+                              <button onClick={() => handleFilePick('rulePath', '.rule')} disabled={uploadingField === 'rulePath'} className="bg-slate-800 text-slate-400 px-3 rounded-lg hover:bg-slate-700 border border-slate-700 hover:text-white transition-colors">
+                                {uploadingField === 'rulePath' ? <Loader2 size={14} className="animate-spin text-indigo-400" /> : <FolderOpen size={14} />}
                               </button>
                             </div>
                         )}
@@ -478,26 +468,16 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                   </>
                 )}
                 
-                {/* Mask Input Logic */}
                 {showMaskInput && (
                    <div className="space-y-4">
                       <div>
                           <label className="block text-xs font-bold text-slate-500 mb-2">{t('config_mask_pattern')}</label>
-                          <input 
-                            type="text"
-                            value={config.mask}
-                            onChange={e => setConfig({...config, mask: e.target.value})}
-                            placeholder="Leave empty for Hashcat default or if using mask file"
-                            className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-sm focus:border-indigo-500 outline-none"
-                          />
+                          <input type="text" value={config.mask} onChange={e => setConfig({...config, mask: e.target.value})} placeholder="Leave empty for Hashcat default or if using mask file" className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-sm focus:border-indigo-500 outline-none" />
                       </div>
                        <div>
                           <div className="flex justify-between items-center mb-2">
                             <label className="text-xs font-bold text-slate-500">{t('config_mask_file')}</label>
-                            <button 
-                               onClick={() => toggleInputMode('mask')} 
-                               className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-white"
-                            >
+                            <button onClick={() => toggleInputMode('mask')} className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-white">
                                {inputModes.mask === 'library' ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
                                {inputModes.mask === 'library' ? t('config_use_library') : t('config_use_file')}
                             </button>
@@ -505,12 +485,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                           
                           {inputModes.mask === 'library' ? (
                                 <div className="relative">
-                                    <select 
-                                        onChange={(e) => setConfig({...config, maskFile: e.target.value})}
-                                        value={config.maskFile}
-                                        disabled={resources.masks.length === 0}
-                                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 text-xs focus:border-indigo-500 outline-none appearance-none disabled:opacity-50"
-                                    >
+                                    <select onChange={(e) => setConfig({...config, maskFile: e.target.value})} value={config.maskFile} disabled={resources.masks.length === 0} className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 text-xs focus:border-indigo-500 outline-none appearance-none disabled:opacity-50">
                                         <option value="">-- Select from Library --</option>
                                         {resources.masks.map((f, i) => <option key={i} value={f.path}>{f.name}</option>)}
                                     </select>
@@ -518,81 +493,31 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                                 </div>
                           ) : (
                                 <div className="flex gap-2">
-                                    <input 
-                                      type="text"
-                                      value={config.maskFile}
-                                      onChange={e => setConfig({...config, maskFile: e.target.value})}
-                                      placeholder="Path to .hcmask file..."
-                                      className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-xs focus:border-indigo-500 outline-none"
-                                    />
-                                    <button 
-                                      onClick={() => handleFilePick('maskFile', '.hcmask')} 
-                                      className="bg-slate-800 text-slate-400 px-3 rounded-lg hover:bg-slate-700 border border-slate-700 hover:text-white transition-colors"
-                                    >
-                                      <FolderOpen size={14} />
+                                    <input type="text" value={config.maskFile} onChange={e => setConfig({...config, maskFile: e.target.value})} placeholder="Path to .hcmask file..." className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 font-mono text-xs focus:border-indigo-500 outline-none" />
+                                    <button onClick={() => handleFilePick('maskFile', '.hcmask')} disabled={uploadingField === 'maskFile'} className="bg-slate-800 text-slate-400 px-3 rounded-lg hover:bg-slate-700 border border-slate-700 hover:text-white transition-colors">
+                                      {uploadingField === 'maskFile' ? <Loader2 size={14} className="animate-spin text-indigo-400" /> : <FolderOpen size={14} />}
                                     </button>
                                 </div>
                           )}
                       </div>
 
-                      {/* --- INCREMENT & INCREMENT INVERSE OPTIONS --- */}
                       <div className="pt-2 border-t border-slate-800 mt-2">
-                        
-                        {/* 1. Toggle Increment */}
                         <div className="flex items-center justify-between mb-2">
                             <label className="flex items-center gap-2 cursor-pointer">
-                                <input 
-                                    type="checkbox" 
-                                    checked={!!config.increment} 
-                                    onChange={(e) => setConfig({...config, increment: e.target.checked})}
-                                    className="w-4 h-4 rounded border-slate-700 bg-slate-950 checked:bg-indigo-600 focus:ring-indigo-500/20"
-                                />
-                                <span className="text-xs font-bold text-slate-400 hover:text-white flex items-center gap-1">
-                                    <ArrowUpRight size={12}/> {t('config_increment_enable')}
-                                </span>
+                                <input type="checkbox" checked={!!config.increment} onChange={(e) => setConfig({...config, increment: e.target.checked})} className="w-4 h-4 rounded border-slate-700 bg-slate-950 checked:bg-indigo-600 focus:ring-indigo-500/20" />
+                                <span className="text-xs font-bold text-slate-400 hover:text-white flex items-center gap-1"><ArrowUpRight size={12}/> {t('config_increment_enable')}</span>
                             </label>
-
-                            {/* 2. Toggle Increment Inverse */}
                             {config.increment && (
                                 <label className="flex items-center gap-2 cursor-pointer animate-in fade-in">
-                                    <input 
-                                        type="checkbox" 
-                                        checked={!!config.incrementInverse} 
-                                        onChange={(e) => setConfig({...config, incrementInverse: e.target.checked})}
-                                        className="w-4 h-4 rounded border-slate-700 bg-slate-950 checked:bg-indigo-600 focus:ring-indigo-500/20"
-                                    />
-                                    <span className="text-xs font-bold text-slate-400 hover:text-white flex items-center gap-1" title="Increment from Right-to-Left">
-                                        <ArrowLeftRight size={12}/> {t('config_increment_inverse')}
-                                    </span>
+                                    <input type="checkbox" checked={!!config.incrementInverse} onChange={(e) => setConfig({...config, incrementInverse: e.target.checked})} className="w-4 h-4 rounded border-slate-700 bg-slate-950 checked:bg-indigo-600 focus:ring-indigo-500/20" />
+                                    <span className="text-xs font-bold text-slate-400 hover:text-white flex items-center gap-1" title="Increment from Right-to-Left"><ArrowLeftRight size={12}/> {t('config_increment_inverse')}</span>
                                 </label>
                             )}
                         </div>
-                        
-                        {/* 3. Min / Max Inputs */}
                         {config.increment && (
                              <div className="grid grid-cols-2 gap-4 pl-6 animate-in fade-in slide-in-from-top-1">
-                                <div>
-                                    <label className="block text-[10px] font-bold text-slate-500 mb-1">{t('config_increment_min')}</label>
-                                    <input 
-                                      type="number"
-                                      min="1"
-                                      value={config.incrementMin}
-                                      onChange={(e) => setConfig({...config, incrementMin: parseInt(e.target.value)})}
-                                      className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 focus:border-indigo-500 outline-none"
-                                      placeholder="1"
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-[10px] font-bold text-slate-500 mb-1">{t('config_increment_max')}</label>
-                                    <input 
-                                      type="number"
-                                      min="1"
-                                      value={config.incrementMax}
-                                      onChange={(e) => setConfig({...config, incrementMax: parseInt(e.target.value)})}
-                                      className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 focus:border-indigo-500 outline-none"
-                                      placeholder="8"
-                                    />
-                                </div>
+                                <div><label className="block text-[10px] font-bold text-slate-500 mb-1">{t('config_increment_min')}</label><input type="number" min="1" value={config.incrementMin} onChange={(e) => setConfig({...config, incrementMin: parseInt(e.target.value)})} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 focus:border-indigo-500 outline-none" placeholder="1" /></div>
+                                <div><label className="block text-[10px] font-bold text-slate-500 mb-1">{t('config_increment_max')}</label><input type="number" min="1" value={config.incrementMax} onChange={(e) => setConfig({...config, incrementMax: parseInt(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 focus:border-indigo-500 outline-none" placeholder="8" /></div>
                              </div>
                         )}
                       </div>
@@ -602,197 +527,54 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
            </div>
         </div>
 
-        {/* 2. PERFORMANCE & FLAGS */}
+        {/* 2. PERFORMANCE */}
         <div className="bg-slate-900 border border-slate-800 p-6 rounded-xl shadow-sm">
-           <h3 className="text-indigo-400 font-mono text-xs uppercase tracking-wider mb-4 flex items-center gap-2 font-bold">
-             <Zap size={14} /> {t('config_perf_title')}
-           </h3>
-           
+           <h3 className="text-indigo-400 font-mono text-xs uppercase tracking-wider mb-4 flex items-center gap-2 font-bold"><Zap size={14} /> {t('config_perf_title')}</h3>
            <div className="space-y-4">
               <div>
                 <label className="block text-xs font-bold text-slate-500 mb-2">{t('config_workload')}</label>
-                <div className="flex gap-2">
-                  {[1,2,3,4].map(w => (
-                    <button
-                      key={w}
-                      onClick={() => setConfig({...config, workloadProfile: w})}
-                      className={`flex-1 py-1.5 text-xs font-bold rounded border transition-all ${config.workloadProfile === w ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-slate-950 border-slate-800 text-slate-400 hover:bg-slate-800'}`}
-                    >
-                      {w}
-                    </button>
-                  ))}
-                </div>
+                <div className="flex gap-2">{[1,2,3,4].map(w => (<button key={w} onClick={() => setConfig({...config, workloadProfile: w})} className={`flex-1 py-1.5 text-xs font-bold rounded border transition-all ${config.workloadProfile === w ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-slate-950 border-slate-800 text-slate-400 hover:bg-slate-800'}`}>{w}</button>))}</div>
               </div>
-              
-              <div>
-                <label className="block text-xs font-bold text-slate-500 mb-2">{t('config_status_timer')}</label>
-                <input 
-                  type="number" 
-                  value={config.statusTimer}
-                  onChange={e => setConfig({...config, statusTimer: parseInt(e.target.value)})}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500" 
-                  placeholder="30"
-                />
-              </div>
-
+              <div><label className="block text-xs font-bold text-slate-500 mb-2">{t('config_status_timer')}</label><input type="number" value={config.statusTimer} onChange={e => setConfig({...config, statusTimer: parseInt(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500" placeholder="30" /></div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2">
-                  {[
-                    { label: t('config_opt_optimized'), key: 'optimizedKernel' },
-                    { label: t('config_opt_remove'), key: 'remove' },
-                    { label: t('config_opt_potfile'), key: 'potfileDisable' },
-                    { label: t('config_opt_hwmon'), key: 'hwmonDisable' },
-                  ].map((opt: any) => (
-                    <label key={opt.key} className="flex items-center gap-3 cursor-pointer group p-2 rounded hover:bg-slate-800/50">
-                      <input 
-                        type="checkbox" 
-                        checked={(config as any)[opt.key]}
-                        onChange={e => setConfig({...config, [opt.key]: e.target.checked})}
-                        className="w-4 h-4 rounded border-slate-700 bg-slate-950 checked:bg-indigo-600 focus:ring-indigo-500/20"
-                      />
-                      <span className="text-sm text-slate-300 group-hover:text-white font-medium">{opt.label}</span>
-                    </label>
-                  ))}
+                  {[{ label: t('config_opt_optimized'), key: 'optimizedKernel' }, { label: t('config_opt_remove'), key: 'remove' }, { label: t('config_opt_potfile'), key: 'potfileDisable' }, { label: t('config_opt_hwmon'), key: 'hwmonDisable' }].map((opt: any) => (<label key={opt.key} className="flex items-center gap-3 cursor-pointer group p-2 rounded hover:bg-slate-800/50"><input type="checkbox" checked={(config as any)[opt.key]} onChange={e => setConfig({...config, [opt.key]: e.target.checked})} className="w-4 h-4 rounded border-slate-700 bg-slate-950 checked:bg-indigo-600 focus:ring-indigo-500/20" /><span className="text-sm text-slate-300 group-hover:text-white font-medium">{opt.label}</span></label>))}
                </div>
            </div>
         </div>
 
-        {/* 3. HARDWARE SELECTION */}
+        {/* 3. HARDWARE */}
         <div className="bg-slate-900 border border-slate-800 p-6 rounded-xl shadow-sm">
-           <div className="flex items-center justify-between mb-4">
-             <h3 className="text-indigo-400 font-mono text-xs uppercase tracking-wider flex items-center gap-2 font-bold">
-                <Cpu size={14} /> {t('config_hardware_title')}
-             </h3>
-             <button onClick={fetchDevices} className="text-xs text-slate-500 hover:text-white flex items-center gap-1 transition-colors">
-               {scanningDevices ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} {t('config_refresh')}
-             </button>
-           </div>
-           
+           <div className="flex items-center justify-between mb-4"><h3 className="text-indigo-400 font-mono text-xs uppercase tracking-wider flex items-center gap-2 font-bold"><Cpu size={14} /> {t('config_hardware_title')}</h3><button onClick={fetchDevices} className="text-xs text-slate-500 hover:text-white flex items-center gap-1 transition-colors">{scanningDevices ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} {t('config_refresh')}</button></div>
            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {availableDevices.length === 0 ? (
-                <div className="col-span-2 text-center text-xs text-slate-500 py-4 border border-dashed border-slate-800 rounded">
-                   {scanningDevices ? t('config_scanning_devices') : t('config_no_devices')}
-                </div>
-              ) : (
-                availableDevices.map(device => {
-                  const isSelected = (config.devices || '').split(',').includes(device.id);
-                  return (
-                    <div 
-                      key={device.id} 
-                      onClick={() => toggleDevice(device.id)}
-                      className={`cursor-pointer p-3 rounded-lg border transition-all flex items-center justify-between ${isSelected ? 'bg-indigo-600/10 border-indigo-500/50' : 'bg-slate-950 border-slate-800 hover:border-slate-600'}`}
-                    >
-                      <div className="flex items-center gap-3">
-                         <div className={`w-4 h-4 rounded border flex items-center justify-center ${isSelected ? 'bg-indigo-600 border-indigo-600' : 'border-slate-600'}`}>
-                           {isSelected && <div className="w-2 h-2 bg-white rounded-sm" />}
-                         </div>
-                         <div>
-                            <div className={`text-xs font-bold ${isSelected ? 'text-indigo-300' : 'text-slate-300'}`}>{device.name}</div>
-                            <div className="text-[10px] text-slate-500">{device.type} ID #{device.id}</div>
-                         </div>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
+              {availableDevices.length === 0 ? (<div className="col-span-2 text-center text-xs text-slate-500 py-4 border border-dashed border-slate-800 rounded">{scanningDevices ? t('config_scanning_devices') : t('config_no_devices')}</div>) : (availableDevices.map(device => { const isSelected = (config.devices || '').split(',').includes(device.id); return (<div key={device.id} onClick={() => toggleDevice(device.id)} className={`cursor-pointer p-3 rounded-lg border transition-all flex items-center justify-between ${isSelected ? 'bg-indigo-600/10 border-indigo-500/50' : 'bg-slate-950 border-slate-800 hover:border-slate-600'}`}><div className="flex items-center gap-3"><div className={`w-4 h-4 rounded border flex items-center justify-center ${isSelected ? 'bg-indigo-600 border-indigo-600' : 'border-slate-600'}`}>{isSelected && <div className="w-2 h-2 bg-white rounded-sm" />}</div><div><div className={`text-xs font-bold ${isSelected ? 'text-indigo-300' : 'text-slate-300'}`}>{device.name}</div><div className="text-[10px] text-slate-500">{device.type} ID #{device.id}</div></div></div></div>); }))}
            </div>
         </div>
 
-        {/* 4. ADVANCED OPTIONS */}
+        {/* 4. ADVANCED */}
         <div className="bg-slate-900 border border-slate-800 rounded-xl shadow-sm overflow-hidden">
-          <button 
-            onClick={() => setShowAdvanced(!showAdvanced)}
-            className="w-full p-4 flex items-center justify-between bg-slate-800/50 hover:bg-slate-800 transition-colors"
-          >
-            <h3 className="text-indigo-400 font-mono text-xs uppercase tracking-wider flex items-center gap-2 font-bold">
-              <Layers size={14} /> {t('config_advanced_title')}
-            </h3>
-            {showAdvanced ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-          </button>
-          
+          <button onClick={() => setShowAdvanced(!showAdvanced)} className="w-full p-4 flex items-center justify-between bg-slate-800/50 hover:bg-slate-800 transition-colors"><h3 className="text-indigo-400 font-mono text-xs uppercase tracking-wider flex items-center gap-2 font-bold"><Layers size={14} /> {t('config_advanced_title')}</h3>{showAdvanced ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</button>
           {showAdvanced && (
             <div className="p-6 space-y-6 border-t border-slate-800">
                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  <div>
-                    <label className="block text-xs font-bold text-slate-500 mb-2">{t('config_skip')}</label>
-                    <input type="number" value={config.skip} onChange={e => setConfig({...config, skip: parseInt(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-white" placeholder="0" />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-slate-500 mb-2">{t('config_bitmap')}</label>
-                    <input type="number" value={config.bitmapMax} onChange={e => setConfig({...config, bitmapMax: parseInt(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-white" />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-slate-500 mb-2">{t('config_spin')}</label>
-                    <input type="number" value={config.spinDamp} onChange={e => setConfig({...config, spinDamp: parseInt(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-white" />
-                  </div>
+                  <div><label className="block text-xs font-bold text-slate-500 mb-2">{t('config_skip')}</label><input type="number" value={config.skip} onChange={e => setConfig({...config, skip: parseInt(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-white" placeholder="0" /></div>
+                  <div><label className="block text-xs font-bold text-slate-500 mb-2">{t('config_bitmap')}</label><input type="number" value={config.bitmapMax} onChange={e => setConfig({...config, bitmapMax: parseInt(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-white" /></div>
+                  <div><label className="block text-xs font-bold text-slate-500 mb-2">{t('config_spin')}</label><input type="number" value={config.spinDamp} onChange={e => setConfig({...config, spinDamp: parseInt(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-white" /></div>
                </div>
-
-               <div className="grid grid-cols-2 md:grid-cols-3 gap-4 pt-4 border-t border-slate-800">
-                  {[
-                    { label: 'Ignore OpenCL', key: 'backendDisableOpenCL' },
-                    { label: 'Ignore CUDA', key: 'backendIgnoreCuda' },
-                    { label: 'Keep Guessing', key: 'keepGuessing' },
-                    { label: 'Disable Self-Test', key: 'selfTestDisable' },
-                    { label: 'Disable Logfile', key: 'logfileDisable' },
-                    { label: 'Force', key: 'force' },
-                  ].map((opt: any) => (
-                    <label key={opt.key} className="flex items-center gap-2 cursor-pointer">
-                      <input 
-                        type="checkbox" 
-                        checked={(config as any)[opt.key]}
-                        onChange={e => setConfig({...config, [opt.key]: e.target.checked})}
-                        className="w-3 h-3 rounded border-slate-700 bg-slate-950 checked:bg-indigo-600"
-                      />
-                      <span className="text-xs text-slate-400 hover:text-white">{opt.label}</span>
-                    </label>
-                  ))}
-               </div>
+               <div className="grid grid-cols-2 md:grid-cols-3 gap-4 pt-4 border-t border-slate-800">{[{ label: 'Ignore OpenCL', key: 'backendDisableOpenCL' }, { label: 'Ignore CUDA', key: 'backendIgnoreCuda' }, { label: 'Keep Guessing', key: 'keepGuessing' }, { label: 'Disable Self-Test', key: 'selfTestDisable' }, { label: 'Disable Logfile', key: 'logfileDisable' }, { label: 'Force', key: 'force' }].map((opt: any) => (<label key={opt.key} className="flex items-center gap-2 cursor-pointer"><input type="checkbox" checked={(config as any)[opt.key]} onChange={e => setConfig({...config, [opt.key]: e.target.checked})} className="w-3 h-3 rounded border-slate-700 bg-slate-950 checked:bg-indigo-600" /><span className="text-xs text-slate-400 hover:text-white">{opt.label}</span></label>))}</div>
             </div>
           )}
         </div>
-
       </div>
 
       <div className="bg-slate-950 border border-slate-800 rounded-xl flex flex-col overflow-hidden h-fit sticky top-6 shadow-lg">
         <div className="bg-slate-900 px-4 py-3 border-b border-slate-800 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Terminal size={16} className="text-slate-400" />
-            <span className="font-mono text-xs text-slate-300 font-bold">{t('config_cmd_preview')}</span>
-          </div>
-          <button 
-             onClick={() => setIsManualMode(!isManualMode)}
-             className={`text-[10px] uppercase font-bold px-2 py-1 rounded border transition-colors flex items-center gap-1 ${isManualMode ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30' : 'bg-slate-800 text-slate-400 border-slate-700'}`}
-          >
-            {isManualMode ? <Edit3 size={10} /> : <Lock size={10} />}
-            {isManualMode ? t('config_manual_mode') : t('config_auto_gen')}
-          </button>
+          <div className="flex items-center gap-2"><Terminal size={16} className="text-slate-400" /><span className="font-mono text-xs text-slate-300 font-bold">{t('config_cmd_preview')}</span></div>
+          <button onClick={() => setIsManualMode(!isManualMode)} className={`text-[10px] uppercase font-bold px-2 py-1 rounded border transition-colors flex items-center gap-1 ${isManualMode ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30' : 'bg-slate-800 text-slate-400 border-slate-700'}`}>{isManualMode ? <Edit3 size={10} /> : <Lock size={10} />}{isManualMode ? t('config_manual_mode') : t('config_auto_gen')}</button>
         </div>
-        <div className="relative bg-black/40 min-h-[150px]">
-           <textarea 
-             className={`w-full h-full min-h-[150px] p-4 font-mono text-xs bg-transparent resize-y outline-none ${isManualMode ? 'text-yellow-400 focus:ring-1 focus:ring-yellow-500/50' : 'text-emerald-400 select-text'}`}
-             value={isManualMode ? manualCommand : commandString}
-             onChange={(e) => setManualCommand(e.target.value)}
-             readOnly={!isManualMode}
-             spellCheck={false}
-           />
-        </div>
+        <div className="relative bg-black/40 min-h-[150px]"><textarea className={`w-full h-full min-h-[150px] p-4 font-mono text-xs bg-transparent resize-y outline-none ${isManualMode ? 'text-yellow-400 focus:ring-1 focus:ring-yellow-500/50' : 'text-emerald-400 select-text'}`} value={isManualMode ? manualCommand : commandString} onChange={(e) => setManualCommand(e.target.value)} readOnly={!isManualMode} spellCheck={false} /></div>
         <div className="bg-slate-900 p-4 border-t border-slate-800 flex flex-col gap-3">
-           <div className="flex gap-3">
-             <button onClick={handleCopy} className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2">
-               <Copy size={16} /> {t('config_btn_copy')}
-             </button>
-             <button onClick={handleRun} className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white py-2.5 rounded-lg text-sm font-medium transition-colors shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-2">
-               <Play size={16} /> {isManualMode ? t('config_btn_run_custom') : t('config_btn_run_auto')}
-             </button>
-           </div>
-           
-           {!isManualMode && (
-             <button 
-              onClick={onQueue}
-              className="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:text-white text-slate-300 py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
-            >
-               <ListPlus size={16} /> {t('config_btn_queue')}
-             </button>
-           )}
+           <div className="flex gap-3"><button onClick={handleCopy} className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"><Copy size={16} /> {t('config_btn_copy')}</button><button onClick={handleRun} className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white py-2.5 rounded-lg text-sm font-medium transition-colors shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-2"><Play size={16} /> {isManualMode ? t('config_btn_run_custom') : t('config_btn_run_auto')}</button></div>
+           {!isManualMode && (<button onClick={onQueue} className="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:text-white text-slate-300 py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"><ListPlus size={16} /> {t('config_btn_queue')}</button>)}
         </div>
       </div>
     </div>

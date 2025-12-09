@@ -1,17 +1,37 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { EscrowJob, EscrowAlgo } from '../types';
+import { EscrowJob, EscrowAlgo, SessionStats } from '../types';
 import { getEscrowJobs, getAlgorithms } from '../services/geminiService';
-import { RefreshCw, Download, Search, UploadCloud, AlertTriangle, DollarSign, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Calendar, FileText, Filter, X, Loader2, Settings, Wallet } from 'lucide-react';
+import { RefreshCw, Download, Search, UploadCloud, AlertTriangle, DollarSign, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Calendar, FileText, Filter, X, Loader2, Settings, Wallet, Zap, Save, Database, ArrowRight, BrainCircuit } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+
+// Updated Settings Interface
+export interface AutoUploadSettings {
+  enabled: boolean;
+  threshold: number;
+}
 
 interface EscrowDashboardProps {
   apiKey: string;
   setApiKey: (key: string) => void;
   initialSubmissionData?: string; 
-  initialAlgoId?: string; 
+  initialAlgoId?: string;
+  autoUploadSettings: AutoUploadSettings;
+  onUpdateAutoUploadSettings: (settings: AutoUploadSettings) => void;
+  // Kept in interface to prevent parent component errors, even if unused internally now
+  sessions: Record<string, SessionStats>;
+  activeSessionId: string | null;
 }
 
-const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, initialSubmissionData, initialAlgoId }) => {
+const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ 
+  apiKey, 
+  setApiKey, 
+  initialSubmissionData, 
+  initialAlgoId,
+  autoUploadSettings,
+  onUpdateAutoUploadSettings,
+  sessions,
+  activeSessionId
+}) => {
   const { t } = useTranslation();
   const [jobs, setJobs] = useState<EscrowJob[]>([]);
   const [algos, setAlgos] = useState<EscrowAlgo[]>([]);
@@ -22,7 +42,7 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
   const [balances, setBalances] = useState<{ currency: string, amount: string, usd: string }[]>([]);
   const [loadingBalance, setLoadingBalance] = useState(false);
   
-  // Filters & Pagination (View Only)
+  // Filters & Pagination
   const [filterAlgo, setFilterAlgo] = useState('');
   const [minPrice, setMinPrice] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
@@ -36,14 +56,18 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
   const [submissionAlgo, setSubmissionAlgo] = useState('');
   const [submissionContent, setSubmissionContent] = useState('');
   const [submissionFile, setSubmissionFile] = useState<File | null>(null);
-
+  
   // Mass Download Modal State
   const [showDownloadModal, setShowDownloadModal] = useState(false);
-  const [dlAlgo, setDlAlgo] = useState(''); // Algorithm ID for download filter
+  const [dlAlgo, setDlAlgo] = useState(''); 
   const [dlMinPrice, setDlMinPrice] = useState('');
   const [downloading, setDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<{ current: number, total: number, found: number } | null>(null);
   const [downloadLogs, setDownloadLogs] = useState<string[]>([]);
+
+  // Auto-Upload Settings Modal
+  const [showAutoSettings, setShowAutoSettings] = useState(false);
+  const [tempAutoSettings, setTempAutoSettings] = useState<AutoUploadSettings>(autoUploadSettings);
 
   // Searchable Algo Dropdown State
   const [algoSearch, setAlgoSearch] = useState('');
@@ -87,12 +111,15 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
     }
   }, [initialAlgoId, algos]);
 
+  useEffect(() => {
+      setTempAutoSettings(autoUploadSettings);
+  }, [autoUploadSettings]);
+
   // --- BALANCE FEATURE ---
   const fetchBalance = async () => {
       if (!apiKey) return;
       setLoadingBalance(true);
       try {
-          // 1. Fetch Balances 
           const balanceUrl = `https://hashes.com/en/api/balance?key=${apiKey}`;
           const balanceRes = await fetch(`http://localhost:3001/api/escrow/proxy?url=${encodeURIComponent(balanceUrl)}`);
           if(!balanceRes.ok) throw new Error("Failed to fetch balance");
@@ -101,16 +128,13 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
 
           delete balanceData.success;
           
-          // 2. Fetch Conversion Rates
           const convUrl = `https://hashes.com/en/api/conversion`;
           const convRes = await fetch(`http://localhost:3001/api/escrow/proxy?url=${encodeURIComponent(convUrl)}`);
           const convData = convRes.ok ? await convRes.json() : {};
 
-          // 3. Combine Data
           const formatted = Object.entries(balanceData).map(([currency, amount]) => {
               const amt = parseFloat(amount as string);
               if (amt <= 0) return null;
-              
               let usdVal = "0.00";
               if (convData && convData[currency]) {
                   usdVal = (amt * parseFloat(convData[currency])).toFixed(2);
@@ -192,21 +216,17 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
     }).length;
   };
 
-  // --- Helper: Delay ---
   const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-  // --- FETCH ---
   const fetchViaProxy = async (fileUrl: string, jobId: number, attempt = 1): Promise<string | null> => {
       const maxAttempts = 3;
       try {
-          // Use our LOCAL server proxy 
           const proxyUrl = `http://localhost:3001/api/escrow/proxy?url=${encodeURIComponent(fileUrl)}`;
           const response = await fetch(proxyUrl);
           
           if (!response.ok) throw new Error(`HTTP_${response.status}`);
 
           const text = await response.text();
-          // Hashes.com sometimes returns HTML error pages
           if (text.trim().toLowerCase().startsWith('<!doctype') || text.includes('<html')) {
              throw new Error("INVALID_CONTENT_HTML");
           }
@@ -222,7 +242,6 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
       }
   };
 
-  // --- MASS DOWNLOAD LOGIC ---
   const startMassDownload = async () => {
     const targetJobs = jobs.filter(j => {
         const meetsAlgo = dlAlgo ? j.algorithmId.toString() === dlAlgo : true;
@@ -296,7 +315,6 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
     }
   };
 
-  // --- SUBMIT HANDLER ---
   const handleSubmit = async () => {
     if((!submissionContent && !submissionFile) || !submissionAlgo || !apiKey) return;
     
@@ -351,6 +369,11 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
     setShowAlgoList(false);
   };
 
+  const saveAutoSettings = () => {
+      onUpdateAutoUploadSettings(tempAutoSettings);
+      setShowAutoSettings(false);
+  };
+
   return (
     <div className="space-y-6 pb-10 relative">
       {/* Header & Controls */}
@@ -390,6 +413,19 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
         </div>
         
         <div className="flex gap-3 flex-wrap items-end">
+           {/* Auto Upload Settings Toggle */}
+           <button
+             onClick={() => setShowAutoSettings(true)}
+             className={`h-10 px-4 rounded border flex items-center gap-2 transition-all font-medium text-xs uppercase tracking-wider ${
+                 autoUploadSettings.enabled 
+                 ? 'bg-amber-500/10 border-amber-500/50 text-amber-500 hover:bg-amber-500/20' 
+                 : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-white'
+             }`}
+           >
+              <Zap size={16} className={autoUploadSettings.enabled ? "fill-current" : ""} />
+              {autoUploadSettings.enabled ? 'Auto-Upload ON' : 'Auto-Upload OFF'}
+           </button>
+
            {/* View Filters */}
            <div>
               <label className="text-xs text-slate-500 uppercase font-bold">{t('escrow_view_min_usd')}</label>
@@ -438,6 +474,67 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
         <div className="bg-red-500/10 border border-red-500/20 text-red-400 p-4 rounded-xl flex items-center gap-3 animate-pulse">
           <AlertTriangle size={20} />
           <span className="text-sm font-medium">{error}</span>
+        </div>
+      )}
+
+      {/* Auto Upload Settings Modal */}
+      {showAutoSettings && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-[100] p-4">
+             <div className="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-md overflow-hidden shadow-2xl flex flex-col animate-in zoom-in-95 duration-200">
+                <div className="p-4 bg-slate-950 border-b border-slate-800 flex justify-between items-center shrink-0">
+                    <h3 className="text-white font-bold flex items-center gap-2">
+                        <Zap size={18} className="text-amber-500"/>
+                        Auto-Upload Settings
+                    </h3>
+                    <button onClick={() => setShowAutoSettings(false)} className="text-slate-500 hover:text-white">
+                        <X size={20}/>
+                    </button>
+                </div>
+                <div className="p-6 space-y-6">
+                    <p className="text-xs text-slate-400 bg-slate-800/50 p-3 rounded border border-slate-800">
+                        When enabled, Reactor will automatically upload recovered hashes to Hashes.com whenever the count of new, unsent hashes reaches the threshold.
+                    </p>
+                    
+                    <div className="flex items-center justify-between">
+                         <label className="text-sm font-bold text-slate-200">Enable Auto-Upload</label>
+                         <button 
+                            onClick={() => setTempAutoSettings(prev => ({ ...prev, enabled: !prev.enabled }))}
+                            className={`w-12 h-6 rounded-full transition-colors relative ${tempAutoSettings.enabled ? 'bg-amber-500' : 'bg-slate-700'}`}
+                         >
+                             <span className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${tempAutoSettings.enabled ? 'left-7' : 'left-1'}`} />
+                         </button>
+                    </div>
+
+                    <div>
+                        <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Upload Threshold (Hashes)</label>
+                        <input 
+                            type="number" 
+                            min="1"
+                            value={tempAutoSettings.threshold}
+                            onChange={(e) => setTempAutoSettings(prev => ({ ...prev, threshold: parseInt(e.target.value) || 10 }))}
+                            className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white outline-none focus:border-amber-500"
+                        />
+                    </div>
+
+                    <div className="bg-slate-800 p-3 rounded-lg border border-slate-700 flex gap-3 items-start">
+                        <BrainCircuit className="text-indigo-400 shrink-0 mt-0.5" size={18} />
+                        <div>
+                            <h4 className="text-xs font-bold text-indigo-300 uppercase mb-1">Smart Detection</h4>
+                            <p className="text-[11px] text-slate-400 leading-relaxed">
+                                Reactor will automatically match the hash type of each running session (e.g., MD5, SHA256) to the correct Hashes.com algorithm ID. This allows you to run concurrent sessions with different hash types seamlessly.
+                            </p>
+                        </div>
+                    </div>
+
+                    <button 
+                        onClick={saveAutoSettings}
+                        className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 transition-all"
+                    >
+                        <Save size={18} />
+                        Save Settings
+                    </button>
+                </div>
+             </div>
         </div>
       )}
 
@@ -584,6 +681,7 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
                     <span className="text-emerald-500">{t('escrow_tip')}</span>
                 </div>
                 
+                {/* Algorithm Search / Selector */}
                 <div className="relative" ref={algoListRef}>
                   <label className="block text-xs font-bold text-slate-500 mb-2 uppercase">{t('escrow_label_algo')}</label>
                   <div className="relative">
@@ -632,7 +730,7 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
                   )}
                   {submissionAlgo && (
                      <div className="text-[10px] text-emerald-400 mt-1 font-mono">
-                        Selected ID: {submissionAlgo}
+                        Target ID: {submissionAlgo}
                      </div>
                   )}
                 </div>
@@ -648,30 +746,39 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ apiKey, setApiKey, in
             </div>
             
             <div className="lg:col-span-2 space-y-4">
-                <div>
-                  <div className="flex justify-between mb-2">
+                {/* Manual / File Upload Header */}
+                <div className="flex flex-col sm:flex-row justify-between items-end sm:items-center gap-2 mb-2">
                     <label className="text-xs font-bold text-slate-500 uppercase">{t('escrow_label_list')}</label>
-                    <label className="text-xs font-bold text-indigo-400 cursor-pointer hover:text-indigo-300 flex items-center gap-1">
-                      <input type="file" className="hidden" onChange={(e) => {
-                        if(e.target.files?.[0]) setSubmissionFile(e.target.files[0]);
-                      }} accept=".txt" />
-                      <FileText size={12} /> {submissionFile ? submissionFile.name : t('escrow_load_file')}
-                    </label>
-                  </div>
-                  <textarea
-                      className="w-full h-48 bg-slate-950 border border-slate-700 rounded px-3 py-2 text-xs font-mono text-slate-300 focus:border-emerald-500 outline-none resize-none"
-                      placeholder={'21232f297a57a5a743894a0e4a801fc3:admin\n5f4dcc3b5aa765d61d8327deb882cf99:password'}
-                      value={submissionContent}
-                      onChange={e => setSubmissionContent(e.target.value)}
-                      disabled={!!submissionFile}
-                  />
-                  {submissionFile && (
+                    <div className="flex items-center gap-3">
+                        {/* File Upload Trigger */}
+                        <label className="text-xs font-bold text-indigo-400 cursor-pointer hover:text-indigo-300 flex items-center gap-1">
+                            <input type="file" className="hidden" onChange={(e) => {
+                                if(e.target.files?.[0]) {
+                                    setSubmissionFile(e.target.files[0]);
+                                    setSubmissionContent(''); 
+                                }
+                            }} accept=".txt" />
+                            <FileText size={12} /> {submissionFile ? submissionFile.name : t('escrow_load_file')}
+                        </label>
+                    </div>
+                </div>
+
+                <textarea
+                    className="w-full h-48 bg-slate-950 border border-slate-700 rounded px-3 py-2 text-xs font-mono text-slate-300 focus:border-emerald-500 outline-none resize-none"
+                    placeholder={'21232f297a57a5a743894a0e4a801fc3:admin\n5f4dcc3b5aa765d61d8327deb882cf99:password'}
+                    value={submissionContent}
+                    onChange={e => {
+                        setSubmissionContent(e.target.value);
+                    }}
+                    disabled={!!submissionFile}
+                />
+                
+                {submissionFile && (
                     <div className="mt-2 text-xs text-emerald-400 flex items-center gap-2">
                       <FileText size={14} /> {t('escrow_file_loaded', { name: submissionFile.name })}
                       <button onClick={() => setSubmissionFile(null)} className="text-red-400 hover:underline ml-2">{t('escrow_btn_clear')}</button>
                     </div>
-                  )}
-                </div>
+                )}
             </div>
         </div>
       </div>

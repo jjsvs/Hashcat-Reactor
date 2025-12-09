@@ -5,6 +5,9 @@
 ## 🚀 Features
 
 * **Real-time Dashboard**: Monitor hashrates, progress, and recovered hashes live via WebSockets.
+* **Remote Access**: Securely share your instance over the web via Zrok tunnels to control it remotely.
+    * *Security*: Supports optional username/password protection.
+* **Hash Extractor**: Extracts crackable hashes directly from Archives (7-Zip, etc.), Documents, Wallets, and System files.
 * **Job Queue System**: Queue up multiple attacks (Wordlist, Mask, Hybrid, etc.) and let Reactor process them sequentially automatically.
 * **Advanced Insights (PACK)**: Integrated Password Analysis and Cracking Kit implementation. Analyzes your cracked hashes to generate optimized masks, identify top password patterns, charsets, and entropy data.
 * **Smart Potfile Management**:
@@ -13,7 +16,9 @@
 * **Multi-Language Support**: Fully localized interface available in **English** and **Chinese (中文)**.
 * **Hardware Monitoring**: Real-time GPU temperature and power usage tracking.
     * *Note: Power draw metrics currently support **NVIDIA GPUs** only via `nvidia-smi`.*
-* **Escrow Integration**: Built-in module to submit cracked hashes to remote escrow APIs (hashes.com).
+* **Escrow Integration & Auto-Uploads**: 
+    * Built-in module to submit cracked hashes to remote escrow APIs (hashes.com).
+    * **Auto-Upload**: Automatically upload recovered hashes when a set threshold is reached (e.g., every 10 hashes). Features smart detection to match running sessions to the correct Hashes.com algorithm ID.
 * **Session History**: Tracks all past attacks, their configurations, and success rates for future reference.
 
 ---
@@ -30,6 +35,16 @@
 | ![Queue Screenshot](screenshots/queue_manager.png) | ![Config panel Screenshot](screenshots/config_panel.png) |
 | *Automated job scheduling* | *access all the features* |
 
+| Remote Access | Hash Extractor |
+|:---:|:---:|
+| ![Remote Access Screenshot](screenshots/remote_access.jpg) | ![Hash Extractor Screenshot](screenshots/hash_extractor.jpg) |
+| *Secure remote tunneling via Zrok* | *Extract hashes from files* |
+
+| Auto-Upload Settings | |
+|:---:|:---:|
+| ![Auto Upload Screenshot](screenshots/auto_uploads.jpg) | |
+| *Automated submission to Escrow* | |
+
 ---
 
 ## 🛠 Prerequisites
@@ -37,8 +52,12 @@
 * **Operating System**: Windows 10/11 (64-bit).
 * **Node.js**: Version 16.x or higher (LTS recommended).
 * **Build Tools**: You generally need C++ build tools for `node-pty` to compile.
-    * Run in an Admin PowerShell: `npm install --global --production windows-build-tools`
+    * Run in an Admin PowerShell: `npm install --global --production windows-build-tools`.
 * **Hashcat Binaries**: You must provide your own Hashcat executables.
+* **Zrok (For Remote Access)**:
+    * To use the **Remote Access** feature, `zrok` must be installed on your system and available in your system path.
+    * You must have your zrok environment enabled using `zrok enable <token>`.
+	* Visit zrok's website for installation guide https://docs.zrok.io/docs/guides/install/
 
 ---
 
@@ -74,7 +93,7 @@ This project is designed to be built for Windows.
     ```bash
     npm run electron:build
     ```
-    *The output installer will be located in the `dist` folder.*
+    *The output installer will be located in the `dist` folder.*.
 
 ---
 

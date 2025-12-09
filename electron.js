@@ -15,8 +15,6 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
-      // Security: allowRunningInsecureContent is sometimes needed if you load local resources improperly, 
-      // but usually defaults are fine. Kept your settings.
     },
   });
 
@@ -24,7 +22,6 @@ function createWindow() {
     mainWindow.loadURL('http://localhost:3000');
     mainWindow.webContents.openDevTools();
   } else {
-    // Ensure this path matches your build output structure
     mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'));
   }
 }
@@ -36,28 +33,32 @@ function startServer() {
     : path.join(process.resourcesPath, 'backend');
 
   const serverPath = path.join(backendDir, 'server.js');
+  
+  // 2. Calculate Frontend Path (Critical Fix)
+  // This resolves to the absolute path of 'dist', even inside app.asar
+  const frontendDir = path.join(__dirname, 'dist'); 
 
   console.log(`[Electron] Launching server from: ${serverPath}`);
-  console.log(`[Electron] Server CWD: ${backendDir}`);
+  console.log(`[Electron] Frontend serving path: ${frontendDir}`);
 
-  // 2. Setup Environment
+  // 3. Setup Environment
   const env = {
     ...process.env,
     IS_ELECTRON: 'true',
     USER_DATA_PATH: app.getPath('userData'), 
-    RESOURCES_PATH: process.resourcesPath 
+    RESOURCES_PATH: process.resourcesPath,
+    FRONTEND_BUILD_PATH: frontendDir // Pass this to server.js
   };
 
   try {
-    // 3. Fork with specific CWD and Pipe stdio
+    // 4. Fork with specific CWD and Pipe stdio
     serverProcess = fork(serverPath, [], {
-      cwd: backendDir, // CRITICAL: Helps node-pty find native binaries
+      cwd: backendDir, 
       env,
-      silent: true, // Must be true to pipe stdout/stderr programmatically
-      stdio: ['pipe', 'pipe', 'pipe', 'ipc'] // Pipe logs so we can see them
+      silent: true, 
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc'] 
     });
 
-    // 4. Wire up logging
     if (serverProcess.stdout) {
         serverProcess.stdout.on('data', (data) => {
             console.log(`[Backend]: ${data.toString().trim()}`);
