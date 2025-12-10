@@ -55,7 +55,7 @@ const getJohnPath = () => {
     return path.join(__dirname, 'john', platform);
 };
 
-// --- HELPER: STRICT HASH CLEANER ---
+// --- HELPER: HASH CLEANER ---
 const cleanHash = (line) => {
     line = line.trim();
     if (!line) return null;
@@ -80,7 +80,6 @@ const cleanHash = (line) => {
         { start: '$office$', end: null }, 
         { start: '$dmg$', end: null },
         { start: '$pfx$', end: null },
-        // New Modules Support
         { start: '$telegram$', end: null },
         { start: '$mozilla$', end: null },
         { start: '$ab$', end: null },
@@ -91,7 +90,6 @@ const cleanHash = (line) => {
         { start: '$keychain$', end: null },
         { start: '$keyring$', end: null },
         { start: '$keystore$', end: null },
-        // Newly Requested Types
         { start: '$apex$', end: null },
         { start: '$applenotes$', end: null },
         { start: '$aruba$', end: null },
@@ -489,9 +487,43 @@ app.post('/api/identify', (req, res) => {
 });
 
 app.post('/api/session/start', (req, res) => {
-  const { customCommand, targetPath, restore, ...config } = req.body;
-  sessionCounter++;
-  const sessionId = `s_${Date.now()}_${uuid()}`;
+  const { customCommand, targetPath, restore, sessionId: reqSessionId, ...config } = req.body;
+  const { executable, cwd } = getHashcatConfig(); 
+  
+  let sessionId = reqSessionId;
+
+  // --- RESTORE LOGIC ---
+  if (restore) {
+      if (!sessionId) {
+          try {
+              
+              if (fs.existsSync(cwd)) {
+                  const files = fs.readdirSync(cwd).filter(f => f.endsWith('.restore'));
+                  if (files.length > 0) {
+                      
+                      files.sort((a, b) => {
+                          return fs.statSync(path.join(cwd, b)).mtimeMs - fs.statSync(path.join(cwd, a)).mtimeMs;
+                      });
+                      
+                      sessionId = files[0].replace(/\.restore$/, '');
+                  }
+              }
+          } catch (e) {
+              console.error("Error finding restore file in CWD:", e);
+          }
+      }
+
+      if (!sessionId) {
+          return res.status(400).json({ message: 'No restore file found in hashcat working directory.' });
+      }
+  } else {
+      // --- NEW SESSION LOGIC ---
+      if (!sessionId) {
+          sessionCounter++;
+          sessionId = `s_${Date.now()}_${uuid()}`;
+      }
+  }
+
   const friendlyName = `Session #${sessionCounter} (${config.hashType || 'Restore'})`;
   const sessionPotFile = path.join(uploadDir, `${sessionId}.potfile`);
   let initialSize = 0;
@@ -505,6 +537,7 @@ app.post('/api/session/start', (req, res) => {
   if (restore) {
     args.push('--restore', '--status', '--status-timer', (config.statusTimer || 30).toString());
     args.push('--potfile-path', sessionPotFile);
+    args.push('--session', sessionId); 
     if (config.hwmonDisable) args.push('--hwmon-disable');
     if (config.backendDisableOpenCL) args.push('--backend-ignore-opencl'); 
     if (config.backendIgnoreCuda) args.push('--backend-ignore-cuda');
@@ -512,6 +545,7 @@ app.post('/api/session/start', (req, res) => {
     args = parseArgs(customCommand);
     if (args.length > 0 && args[0].toLowerCase().includes('hashcat')) args.shift();
     if (!args.includes('--potfile-path')) args.push('--potfile-path', sessionPotFile);
+    args.push('--session', sessionId);
   } else {
     args.push('-m', config.hashType, '-a', config.attackMode.toString(), '-w', config.workloadProfile.toString());
     if (config.devices) args.push('-d', config.devices);
@@ -547,7 +581,7 @@ app.post('/api/session/start', (req, res) => {
     }
     else if ([2, 4, 5, 8, 9].includes(mode)) { if (config.wordlistPath) args.push(config.wordlistPath); }
   }
-  const { executable, cwd } = getHashcatConfig();
+  
   console.log(`[Spawn ${sessionId}] ${executable} ${args.join(' ')}`);
   let lastSessionPotSize = initialSize;
   const checkSessionPotfile = () => {

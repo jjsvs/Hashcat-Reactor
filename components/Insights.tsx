@@ -4,11 +4,11 @@ import {
   Loader2, ShieldCheck, ChevronUp, ChevronDown, PlayCircle, 
   GitBranch, ArrowLeftRight, Database, Clock, Copy, BarChart3, 
   PieChart, Calculator, X, Sparkles, Info, Zap, Eye, Camera,
-  TrendingUp, BarChart2
+  TrendingUp, BarChart2, Cpu, Activity, Timer
 } from 'lucide-react';
 import { 
-  ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, 
-  Tooltip, ResponsiveContainer
+  BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, 
+  Tooltip, ResponsiveContainer, LabelList 
 } from 'recharts';
 import { SessionStats, LogEntry, HashcatConfig, RecoveredHash } from '../types';
 import { HASH_TYPES } from '../constants';
@@ -290,8 +290,7 @@ const Insights: React.FC<InsightsProps> = ({
 
     const workerRef = useRef<Worker | null>(null);
     
-    // Use a Ref to track the current scope inside the async worker callback
-    // This prevents race conditions where 'All' mode overwrites 'Snapshot' mode
+    
     const scopeRef = useRef(insightScope);
 
     useEffect(() => {
@@ -514,11 +513,10 @@ const Insights: React.FC<InsightsProps> = ({
             return;
         }
         
-        // Stop any pending analysis spinners
+       
         setIsAnalyzing(false);
         
-        // Ensure we switch scope first, then load data safely
-        // Merging with INITIAL_INSIGHTS prevents crashes if the saved snapshot is incomplete
+       
         setInsightScope('historical_snapshot');
         setInsights({ ...INITIAL_INSIGHTS, ...session.analysis });
         
@@ -536,55 +534,63 @@ const Insights: React.FC<InsightsProps> = ({
         }
     };
 
+    
     const getSessionChartData = (s: PastSession) => {
         const hours = s.duration / 3600;
         const wattHours = s.powerUsage * hours;
-        const efficiency = wattHours > 0 ? s.recovered / wattHours : 0;
+        const hashrateMh = s.avgHashrate / 1000000;
+        
+        return [
+            {
+                name: 'Hashrate (MH/s)',
+                value: hashrateMh > 0 ? hashrateMh : 0.1, // Avoid log(0)
+                displayValue: `${hashrateMh.toFixed(2)} MH/s`,
+                fill: '#6366f1', // Indigo
+                unit: 'MH/s'
+            },
+            {
+                name: 'Energy (Wh)',
+                value: wattHours > 0 ? parseFloat(wattHours.toFixed(2)) : 0.1,
+                displayValue: `${wattHours.toFixed(2)} Wh`,
+                fill: '#f59e0b', // Amber
+                unit: 'Wh'
+            },
+            {
+                name: 'Recovered',
+                value: s.recovered > 0 ? s.recovered : 0.1,
+                displayValue: s.recovered.toString(),
+                fill: '#10b981', // Emerald
+                unit: 'Hashes'
+            }
+        ];
+    };
+
+    // Helper to extract session specific stats for the header
+    const getSessionStats = (s: PastSession) => {
+        const hours = s.duration / 3600;
+        const wattHours = s.powerUsage * hours;
+        const efficiency = wattHours > 0 ? (s.recovered / wattHours) : 0;
         const algoName = HASH_TYPES.find(h => h.id === s.algorithmId)?.name || s.algorithmId;
         
-        return [{
-            name: `Session`,
-            label: new Date(s.date).toLocaleString(),
+        return {
             algo: algoName,
             mode: s.attackType,
-            durationFormatted: formatTime(s.duration),
-            hashrateFormatted: (s.avgHashrate / 1000000).toFixed(2) + ' MH/s',
-            energyWh: parseFloat(wattHours.toFixed(2)),
-            recovered: s.recovered,
-            efficiency: parseFloat(efficiency.toFixed(4)) 
-        }];
+            duration: formatTime(s.duration),
+            efficiency: efficiency.toFixed(2)
+        };
     };
 
     const CustomTooltip = ({ active, payload, label }: any) => {
         if (active && payload && payload.length) {
             const data = payload[0].payload;
             return (
-                <div className="bg-slate-900 border border-slate-700 p-3 rounded-lg shadow-xl text-xs z-50 min-w-[200px]">
-                    <div className="font-bold text-slate-200 mb-1 border-b border-slate-800 pb-1">{data.label}</div>
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 mt-2">
-                        <span className="text-slate-500">Algorithm:</span>
-                        <span className="text-slate-300 font-mono text-right">{data.algo}</span>
-                        <span className="text-slate-500">Mode:</span>
-                        <span className="text-slate-300 font-mono text-right">{data.mode}</span>
-                        <span className="text-slate-500">Duration:</span>
-                        <span className="text-slate-300 font-mono text-right">{data.durationFormatted}</span>
-                        <span className="text-slate-500">Avg Hashrate:</span>
-                        <span className="text-slate-300 font-mono text-right">{data.hashrateFormatted}</span>
+                <div className="bg-slate-900 border border-slate-700 p-3 rounded-lg shadow-xl text-xs z-50">
+                    <div className="font-bold text-slate-200 mb-1 flex items-center gap-2">
+                        <div className="w-2 h-2 rounded-full" style={{ backgroundColor: data.fill }}></div>
+                        {data.name}
                     </div>
-                    <div className="border-t border-slate-700 my-2"></div>
-                    <div className="flex flex-col gap-1">
-                        <div className="flex items-center justify-between gap-4">
-                            <span className="text-emerald-400 font-bold flex items-center gap-1"><ShieldCheck size={12}/> Recovered:</span>
-                            <span className="text-white font-mono">{data.recovered}</span>
-                        </div>
-                        <div className="flex items-center justify-between gap-4">
-                            <span className="text-amber-400 font-bold flex items-center gap-1"><Zap size={12}/> Energy Cost:</span>
-                            <span className="text-white font-mono">{data.energyWh} Wh</span>
-                        </div>
-                        <div className="flex items-center justify-between gap-4 mt-1 pt-1 border-t border-slate-800/50">
-                            <span className="text-indigo-400 font-bold flex items-center gap-1"><TrendingUp size={12}/> Efficiency:</span>
-                            <span className="text-white font-mono">{data.efficiency.toFixed(2)} H/Wh</span>
-                        </div>
+                    <div className="text-slate-400">
+                        Value: <span className="text-white font-mono font-bold ml-1">{data.displayValue}</span>
                     </div>
                 </div>
             );
@@ -782,7 +788,9 @@ const Insights: React.FC<InsightsProps> = ({
                                                                 </tr>
                                                             </thead>
                                                             <tbody className="divide-y divide-slate-800/30 text-xs">
-                                                                {sessions.map((s) => (
+                                                                {sessions.map((s) => {
+                                                                    const stats = getSessionStats(s);
+                                                                    return (
                                                                     <React.Fragment key={s.id}>
                                                                         <tr className={`transition-colors ${expandedSessionId === s.id ? 'bg-indigo-900/20 border-l-2 border-indigo-500' : 'hover:bg-slate-800/30'}`}>
                                                                             <td className="p-2 pl-8 text-slate-400">{new Date(s.date).toLocaleString()}</td>
@@ -815,66 +823,77 @@ const Insights: React.FC<InsightsProps> = ({
                                                                         {expandedSessionId === s.id && (
                                                                             <tr ref={activeGraphRef} className="bg-slate-900/80 border-b border-slate-800/50 animate-in fade-in slide-in-from-top-2 duration-200">
                                                                                 <td colSpan={7} className="p-4">
-                                                                                    <div className="h-[300px] w-full bg-slate-950/50 rounded-lg border border-slate-800/50 p-2 relative">
-                                                                                        <div className="absolute top-2 left-3 text-xs font-bold text-slate-500 flex items-center gap-1">
-                                                                                            <TrendingUp size={12}/> Session Efficiency Metrics
+                                                                                    <div className="flex flex-col md:flex-row gap-4 h-[260px]">
+                                                                                        {/* Metadata Sidebar */}
+                                                                                        <div className="md:w-1/3 flex flex-col gap-2 h-full">
+                                                                                            <div className="bg-slate-950/50 p-3 rounded border border-slate-800/50 flex items-center justify-between flex-1">
+                                                                                                <div className="flex items-center gap-2 text-slate-500">
+                                                                                                    <Cpu size={14} /> <span className="text-xs uppercase font-bold">Algorithm</span>
+                                                                                                </div>
+                                                                                                <span className="text-slate-200 font-mono text-xs">{stats.algo}</span>
+                                                                                            </div>
+                                                                                            <div className="bg-slate-950/50 p-3 rounded border border-slate-800/50 flex items-center justify-between flex-1">
+                                                                                                <div className="flex items-center gap-2 text-slate-500">
+                                                                                                    <Sparkles size={14} /> <span className="text-xs uppercase font-bold">Mode</span>
+                                                                                                </div>
+                                                                                                <span className="text-slate-200 font-mono text-xs">{stats.mode}</span>
+                                                                                            </div>
+                                                                                            <div className="bg-slate-950/50 p-3 rounded border border-slate-800/50 flex items-center justify-between flex-1">
+                                                                                                <div className="flex items-center gap-2 text-slate-500">
+                                                                                                    <Timer size={14} /> <span className="text-xs uppercase font-bold">Duration</span>
+                                                                                                </div>
+                                                                                                <span className="text-slate-200 font-mono text-xs">{stats.duration}</span>
+                                                                                            </div>
+                                                                                            
+                                                                                            {/* Efficiency KPI Card */}
+                                                                                            <div className="bg-indigo-900/10 p-3 rounded border border-indigo-500/30 flex items-center justify-between flex-1">
+                                                                                                <div className="flex items-center gap-2 text-indigo-400">
+                                                                                                    <TrendingUp size={14} /> <span className="text-xs uppercase font-bold">Efficiency</span>
+                                                                                                </div>
+                                                                                                <div className="text-right">
+                                                                                                    <span className="text-white font-mono font-bold text-sm block">{stats.efficiency}</span>
+                                                                                                    <span className="text-[10px] text-indigo-300 block">Hashes / Wh</span>
+                                                                                                </div>
+                                                                                            </div>
                                                                                         </div>
-                                                                                        <ResponsiveContainer width="100%" height="100%">
-                                                                                            <ComposedChart data={getSessionChartData(s)} margin={{ top: 25, right: 30, bottom: 20, left: 10 }}>
-                                                                                                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={true} horizontal={true} />
-                                                                                                <XAxis 
-                                                                                                    dataKey="name" 
-                                                                                                    stroke="#64748b" 
-                                                                                                    fontSize={11} 
-                                                                                                    tickLine={false} 
-                                                                                                    axisLine={false}
-                                                                                                    hide={true}
-                                                                                                />
-                                                                                                <YAxis 
-                                                                                                    yAxisId="left" 
-                                                                                                    stroke="#f59e0b" 
-                                                                                                    fontSize={10} 
-                                                                                                    tickLine={false} 
-                                                                                                    axisLine={false}
-                                                                                                    label={{ value: 'Energy (Wh)', angle: -90, position: 'insideLeft', fill: '#f59e0b', fontSize: 10 }}
-                                                                                                />
-                                                                                                <YAxis 
-                                                                                                    yAxisId="right" 
-                                                                                                    orientation="right" 
-                                                                                                    stroke="#10b981" 
-                                                                                                    fontSize={10} 
-                                                                                                    tickLine={false} 
-                                                                                                    axisLine={false}
-                                                                                                    label={{ value: 'Hashes Recovered', angle: 90, position: 'insideRight', fill: '#10b981', fontSize: 10 }}
-                                                                                                />
-                                                                                                <Tooltip content={<CustomTooltip />} cursor={{ fill: '#334155', opacity: 0.2 }} />
-                                                                                                <Bar 
-                                                                                                    yAxisId="left" 
-                                                                                                    dataKey="energyWh" 
-                                                                                                    fill="#f59e0b" 
-                                                                                                    barSize={40} 
-                                                                                                    radius={[4, 4, 0, 0]} 
-                                                                                                    opacity={0.7} 
-                                                                                                    name="Energy (Wh)" 
-                                                                                                />
-                                                                                                <Line 
-                                                                                                    yAxisId="right" 
-                                                                                                    type="monotone" 
-                                                                                                    dataKey="recovered" 
-                                                                                                    stroke="#10b981" 
-                                                                                                    strokeWidth={3} 
-                                                                                                    dot={{ r: 6, fill: '#0f172a', stroke: '#10b981', strokeWidth: 2 }} 
-                                                                                                    activeDot={{ r: 8, fill: '#10b981' }} 
-                                                                                                    name="Recovered" 
-                                                                                                />
-                                                                                            </ComposedChart>
-                                                                                        </ResponsiveContainer>
+                                                                                        
+                                                                                        {/* Log Chart Container */}
+                                                                                        <div className="md:w-2/3 h-full relative bg-slate-950/50 rounded border border-slate-800/50 p-2">
+                                                                                            <div className="absolute top-2 left-3 text-xs font-bold text-slate-500 flex items-center gap-1 z-10">
+                                                                                                <BarChart2 size={12}/> Magnitude Comparison (Log Scale)
+                                                                                            </div>
+                                                                                            <ResponsiveContainer width="100%" height="100%">
+                                                                                                <BarChart 
+                                                                                                    layout="vertical" 
+                                                                                                    data={getSessionChartData(s)} 
+                                                                                                    margin={{ top: 30, right: 120, bottom: 20, left: 20 }}
+                                                                                                >
+                                                                                                    <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" horizontal={false} />
+                                                                                                    <XAxis type="number" scale="log" domain={['dataMin', 'auto']} hide />
+                                                                                                    <YAxis 
+                                                                                                        type="category" 
+                                                                                                        dataKey="name" 
+                                                                                                        width={100} 
+                                                                                                        tick={{ fill: '#94a3b8', fontSize: 11, fontWeight: 'bold' }} 
+                                                                                                        tickLine={false} 
+                                                                                                        axisLine={false}
+                                                                                                    />
+                                                                                                    <Tooltip cursor={{ fill: '#334155', opacity: 0.1 }} content={<CustomTooltip />} />
+                                                                                                    <Bar dataKey="value" barSize={24} radius={[0, 4, 4, 0]}>
+                                                                                                        {getSessionChartData(s).map((entry, index) => (
+                                                                                                            <Cell key={`cell-${index}`} fill={entry.fill} />
+                                                                                                        ))}
+                                                                                                        <LabelList dataKey="displayValue" position="right" fill="#cbd5e1" fontSize={12} fontWeight="bold" />
+                                                                                                    </Bar>
+                                                                                                </BarChart>
+                                                                                            </ResponsiveContainer>
+                                                                                        </div>
                                                                                     </div>
                                                                                 </td>
                                                                             </tr>
                                                                         )}
                                                                     </React.Fragment>
-                                                                ))}
+                                                                );})}
                                                             </tbody>
                                                         </table>
                                                     </div>
