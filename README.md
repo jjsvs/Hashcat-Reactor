@@ -101,7 +101,7 @@ This project is designed to be built for Windows.
 
 Join our community to discuss, request features, or get help with setup.
 
-[**Join the Discord Server**](https://discord.gg/MgkKXZfc)
+[**Join the Discord Server**](https://discord.gg/cpAFXhGtbN)
 
 ---
 
