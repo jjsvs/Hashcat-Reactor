@@ -23,6 +23,7 @@ import Insights, { PastSession } from './components/Insights';
 import PowerGraph from './components/PowerGraph';
 import RemoteAccess from './components/RemoteAccess';
 import File2John from './components/File2John';
+import SessionControls from './components/SessionControls'; 
 import { getAlgorithms } from './services/geminiService';
 
 const uuid = () => Math.random().toString(36).substring(2, 9);
@@ -38,7 +39,6 @@ const getAttackModeName = (mode: number) => {
     }
 };
 
-// --- SNAPSHOT GENERATION LOGIC ---
 const getCharMask = (char: string) => {
     if (/[a-z]/.test(char)) return '?l';
     if (/[A-Z]/.test(char)) return '?u';
@@ -74,7 +74,13 @@ const calculateEntropy = (password: string) => {
 
 const generateSnapshot = (hashes: RecoveredHash[], hashrate: number) => {
     if (!hashes || hashes.length === 0) {
-        return { sortedMasks: [], lengthCounts: {}, charsets: {}, topPasswords: [], topBaseWords: [], topPrefixes: [], topSuffixes: [], avgEntropy: 0, total: 0 };
+        return { 
+            sortedMasks: [], lengthCounts: {}, charsets: {}, 
+            topPasswords: [], topBaseWords: [], topPrefixes: [], topSuffixes: [], 
+            yearPatterns: [], datePatterns: [], delimiters: [], leetspeak: [],
+            positionCounts: { lower: [], upper: [], digit: [], special: [] }, 
+            avgEntropy: 0, total: 0 
+        };
     }
 
     const maskCounts: Record<string, number> = {};
@@ -83,40 +89,108 @@ const generateSnapshot = (hashes: RecoveredHash[], hashrate: number) => {
     const baseWordFrequency: Record<string, number> = {};
     const prefixCounts: Record<string, number> = {};
     const suffixCounts: Record<string, number> = {};
+    
+    // Semantic Counters
+    const yearCounts: Record<string, number> = {};
+    const dateCounts: Record<string, number> = {};
+    const delimiterCounts: Record<string, number> = {};
+    const subCounts: Record<string, number> = {};
+
+    // Position Analysis Arrays (Max length 16)
+    const posLower = new Array(16).fill(0);
+    const posUpper = new Array(16).fill(0);
+    const posDigit = new Array(16).fill(0);
+    const posSpecial = new Array(16).fill(0);
+
     const charsets: Record<string, number> = {
         'Numeric': 0, 'Lower Alpha': 0, 'Mixed Alpha': 0, 'Mixed Alpha-Num': 0, 'Full Complex': 0
     };
     let totalEntropy = 0;
     let validCount = 0;
 
+    // Semantic Regex Patterns
+    const regexYMD = /\b(19|20)\d{2}([-/.:_])\d{1,2}\2\d{1,2}\b/g;
+    const regexDMY = /\b\d{1,2}([-/.:_])\d{1,2}\1(19|20)\d{2}\b/g;
+    const regexShort = /\b\d{1,2}([-/.:_])\d{1,2}\1\d{2}\b/g;
+    const regexCompactYMD = /\b(19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\b/g;
+    const regexCompactShort = /\b(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d{2}\b/g;
+    
+    const leetspeakMap: Record<string, string> = { 
+        '@': 'a', '4': 'a', '3': 'e', '1': 'i', '!': 'i', 
+        '0': 'o', '$': 's', '5': 's', '7': 't', '+': 't', '(': 'c' 
+    };
+
     hashes.forEach(h => {
         const p = h.plain;
         if (!p) return;
         validCount++;
 
-        // Masks
         const mask = p.split('').map(getCharMask).join('');
         maskCounts[mask] = (maskCounts[mask] || 0) + 1;
 
-        // Structure analysis
+        // Base Word / Structure
         const match = p.match(/^([^a-zA-Z]*)([a-zA-Z]+.*[a-zA-Z]|[a-zA-Z])([^a-zA-Z]*)$/);
         if (match) {
             const prefix = match[1];
-            const root = match[2];
             const suffix = match[3];
             if (prefix) prefixCounts[prefix] = (prefixCounts[prefix] || 0) + 1;
             if (suffix) suffixCounts[suffix] = (suffixCounts[suffix] || 0) + 1;
-            if (root.length > 3) baseWordFrequency[root] = (baseWordFrequency[root] || 0) + 1;
-        } else if (/^[a-zA-Z]+$/.test(p)) {
-            baseWordFrequency[p] = (baseWordFrequency[p] || 0) + 1;
         }
 
-        // Stats
+        // Base Word Extraction (Generalized)
+        const wordMatch = p.match(/[a-zA-Z]{3,}/g);
+        if (wordMatch) {
+            const longestWord = wordMatch.reduce((a, b) => a.length >= b.length ? a : b);
+            const key = longestWord.charAt(0).toUpperCase() + longestWord.slice(1).toLowerCase();
+            baseWordFrequency[key] = (baseWordFrequency[key] || 0) + 1;
+        }
+
+        // --- Position Analysis ---
+        for(let i = 0; i < Math.min(p.length, 16); i++) {
+            const char = p[i];
+            if (/[a-z]/.test(char)) posLower[i]++;
+            else if (/[A-Z]/.test(char)) posUpper[i]++;
+            else if (/[0-9]/.test(char)) posDigit[i]++;
+            else posSpecial[i]++;
+        }
+
+        // --- Date Analysis ---
+        const matchedDates: string[] = [];
+        const matches = [
+            ...Array.from(p.matchAll(regexYMD)),
+            ...Array.from(p.matchAll(regexDMY)),
+            ...Array.from(p.matchAll(regexShort)),
+            ...Array.from(p.matchAll(regexCompactYMD)),
+            ...Array.from(p.matchAll(regexCompactShort))
+        ];
+        
+        matches.forEach(m => matchedDates.push(m[0]));
+        matchedDates.forEach(d => dateCounts[d] = (dateCounts[d] || 0) + 1);
+
+        // Simple Year Fallback
+        if (matchedDates.length === 0) {
+            const years = p.match(/(?:19|20)\d{2}/g);
+            if (years) years.forEach(y => yearCounts[y] = (yearCounts[y] || 0) + 1);
+        }
+
+        // --- Delimiters ---
+        const delimiterMatch = p.match(/[a-zA-Z]([-/:.+_!@?])[0-9]/);
+        if (delimiterMatch) {
+            delimiterCounts[delimiterMatch[1]] = (delimiterCounts[delimiterMatch[1]] || 0) + 1;
+        }
+
+        // --- Leetspeak ---
+        for (const char of p) {
+            if (leetspeakMap[char]) {
+                const key = leetspeakMap[char] + ' -> ' + char;
+                subCounts[key] = (subCounts[key] || 0) + 1;
+            }
+        }
+
         lengthCounts[p.length] = (lengthCounts[p.length] || 0) + 1;
         passwordFrequency[p] = (passwordFrequency[p] || 0) + 1;
         totalEntropy += calculateEntropy(p);
 
-        // Charsets
         const hasDigit = /[0-9]/.test(p);
         const hasLower = /[a-z]/.test(p);
         const hasUpper = /[A-Z]/.test(p);
@@ -137,12 +211,18 @@ const generateSnapshot = (hashes: RecoveredHash[], hashrate: number) => {
             return { mask, count, complexity, timeToCrack: complexity / targetPps };
         })
         .sort((a, b) => b.count - a.count)
-        .slice(0, 100); // Limit to top 100 to save space
+        .slice(0, 100); 
 
     const topPasswords = Object.entries(passwordFrequency).sort(([, a], [, b]) => b - a).slice(0, 50) as [string, number][];
     const topBaseWords = Object.entries(baseWordFrequency).sort(([, a], [, b]) => b - a).slice(0, 50) as [string, number][];
     const topPrefixes = Object.entries(prefixCounts).sort(([, a], [, b]) => b - a).slice(0, 20) as [string, number][];
     const topSuffixes = Object.entries(suffixCounts).sort(([, a], [, b]) => b - a).slice(0, 20) as [string, number][];
+    
+    // Process new lists
+    const yearPatterns = Object.entries(yearCounts).sort(([, a], [, b]) => b - a).slice(0, 15) as [string, number][];
+    const datePatterns = Object.entries(dateCounts).sort(([, a], [, b]) => b - a).slice(0, 15) as [string, number][];
+    const delimiters = Object.entries(delimiterCounts).sort(([, a], [, b]) => b - a).slice(0, 10) as [string, number][];
+    const leetspeak = Object.entries(subCounts).sort(([, a], [, b]) => b - a).slice(0, 15) as [string, number][];
 
     return {
         sortedMasks,
@@ -152,9 +232,23 @@ const generateSnapshot = (hashes: RecoveredHash[], hashrate: number) => {
         topBaseWords,
         topPrefixes,
         topSuffixes,
+        yearPatterns,
+        datePatterns,
+        delimiters,
+        leetspeak,
+        positionCounts: { lower: posLower, upper: posUpper, digit: posDigit, special: posSpecial }, 
         avgEntropy: validCount > 0 ? totalEntropy / validCount : 0,
         total: validCount
     };
+};
+
+// --- HELPER: FORMAT HASHRATE DYNAMICALLY ---
+const formatHashrate = (rate: number) => {
+    if (rate === 0) return '0 H/s';
+    if (rate >= 1000000000) return `${(rate / 1000000000).toFixed(2)} GH/s`;
+    if (rate >= 1000000) return `${(rate / 1000000).toFixed(2)} MH/s`;
+    if (rate >= 1000) return `${(rate / 1000).toFixed(2)} kH/s`;
+    return `${rate.toFixed(0)} H/s`;
 };
 
 const getSocketUrl = () => {
@@ -170,10 +264,8 @@ function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'insights' | 'terminal' | 'escrow' | 'config' | 'queue' | 'remote' | 'file2john'>('dashboard');
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('hashes_apikey') || '');
   
-  // Detect remote session
   const isRemoteSession = useMemo(() => window.location.hostname.includes('zrok.io') || !window.process, []);
 
-  // Redirect if trying to access restricted tabs while remote
   useEffect(() => {
     if (isRemoteSession && (activeTab === 'terminal' || activeTab === 'remote')) {
         setActiveTab('dashboard');
@@ -612,6 +704,8 @@ function App() {
       setManualTargetFile(file);
       setManualTargetInput(''); 
     }
+    // RESET INPUT VALUE TO ALLOW RE-SELECTION OF SAME FILE
+    e.target.value = '';
   };
 
   const handleManualTargetLoad = async () => {
@@ -863,6 +957,18 @@ function App() {
           <div className="flex items-center gap-4"><div><h1 className="text-xs text-slate-400 font-bold uppercase">{t('active_target')}</h1><span className="text-slate-100 font-mono text-sm">{activeSessionId ? (session.target || t('target_na')) : t('target_configure')}</span></div></div>
           <div className="flex items-center gap-3">
              {jobQueue.length > 0 && (<div className="flex items-center gap-2 px-3 py-1 bg-slate-900 border border-slate-800 rounded-lg text-xs font-bold text-slate-400"><List size={14} /><span>{t('Queue pending', { count: jobQueue.length })}</span>{isQueueProcessing && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>}</div>)}
+            
+            {/* Added Session Controls Here with Optimistic Update */}
+            <SessionControls 
+                sessionId={activeSessionId} 
+                status={status} 
+                onOptimisticUpdate={(newStatus) => {
+                    if (activeSessionId) {
+                        updateSession(activeSessionId, { status: newStatus });
+                    }
+                }}
+            />
+
             {(!activeSessionId || session.status === SessionStatus.IDLE || session.status === SessionStatus.COMPLETED || session.status === SessionStatus.ERROR || session.status === SessionStatus.STOPPED) ? (
               <div className="flex items-center gap-3 bg-slate-900 p-1 rounded-lg border border-slate-800">
                   <button onClick={() => setRestoreMode(!restoreMode)} className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${restoreMode ? 'bg-amber-500/20 text-amber-400' : 'text-slate-400 hover:text-slate-200'}`}><RefreshCw size={14} />{restoreMode ? t('restore_mode') : t('new_session')}</button>
@@ -880,7 +986,8 @@ function App() {
             {activeTab === 'dashboard' && (
               <>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                  <MetricCard label={t('card_hashrate')} value={`${(session.hashrate / 1000000).toFixed(2)} MH/s`} subValue={t('card_sub_speed')} icon={Zap} color="indigo" />
+                  {/* DYNAMIC HASHRATE CARD */}
+                  <MetricCard label={t('card_hashrate')} value={formatHashrate(session.hashrate)} subValue={t('card_sub_speed')} icon={Zap} color="indigo" />
                   <MetricCard label={t('card_recovered')} value={`${session.recovered} / ${session.total}`} subValue={t('card_sub_recovered', { percent: session.total > 0 ? Math.min(((session.recovered / session.total) * 100), 100).toFixed(2) : 0 })} icon={ShieldCheck} color="emerald" />
                   <MetricCard label={t('card_mode')} value={HASH_TYPES.find(h => h.id === session.hashType)?.name || session.hashType || t('target_na')} subValue={session.hashType ? t('card_mode_label', { type: session.hashType }) : t('card_mode_ready')} icon={Hash} color="slate" />
                   <MetricCard label={t('card_progress')} value={`${session.progress.toFixed(2)}%`} subValue={session.estimatedTimeRemaining} icon={Activity} color="blue" />

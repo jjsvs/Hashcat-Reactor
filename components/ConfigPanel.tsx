@@ -1,12 +1,23 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { HashcatConfig as IConfig } from '../types';
 import { ATTACK_MODES, HASH_TYPES } from '../constants';
 import { 
   Copy, Terminal, Settings, Play, FolderOpen, ChevronDown, ChevronRight, 
   Zap, Layers, Edit3, Lock, Wand2, Loader2, ListPlus, Cpu, HardDrive, 
-  RefreshCw, ToggleLeft, ToggleRight, ArrowUpRight, ArrowLeftRight 
+  RefreshCw, ToggleLeft, ToggleRight, ArrowUpRight, ArrowLeftRight, Search, X,
+  User, Divide, AlertTriangle
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+
+interface ExtendedConfig extends IConfig {
+  username?: boolean;
+  separator?: string;
+  hexSalt?: boolean;
+  hexCharset?: boolean;
+  markovThreshold?: number;
+  ruleLeft?: string;
+  ruleRight?: string;
+}
 
 interface ConfigPanelProps {
   config: IConfig;
@@ -26,7 +37,6 @@ interface Resources {
   masks: ResourceFile[];
 }
 
-// Helper to determine backend URL
 const getSocketUrl = () => {
     const host = window.location.hostname;
     if (host.includes('zrok.io') || window.location.port === '3001') {
@@ -35,28 +45,31 @@ const getSocketUrl = () => {
     return 'http://localhost:3001';
 };
 
-const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, onQueue }) => {
+const ConfigPanel: React.FC<ConfigPanelProps> = ({ config: propConfig, setConfig: propSetConfig, onStart, onQueue }) => {
   const { t } = useTranslation();
   
+  // Cast to ExtendedConfig to support new fields locally
+  const config = propConfig as ExtendedConfig;
+  const setConfig = propSetConfig as (config: ExtendedConfig) => void;
+
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [isManualMode, setIsManualMode] = useState(false);
   const [manualCommand, setManualCommand] = useState('');
   const [detecting, setDetecting] = useState(false);
   
-  // Device Selection State
   const [availableDevices, setAvailableDevices] = useState<{id: string, name: string, type: string}[]>([]);
   const [scanningDevices, setScanningDevices] = useState(false);
 
-  // Resource Library State
   const [resources, setResources] = useState<Resources>({ wordlists: [], rules: [], masks: [] });
   const [scanningResources, setScanningResources] = useState(false);
   
-  // Upload State for Remote Clients
   const [uploadingField, setUploadingField] = useState<string | null>(null);
+  const [isHashSearchOpen, setIsHashSearchOpen] = useState(false);
+  const [hashSearchQuery, setHashSearchQuery] = useState('');
+  const hashDropdownRef = useRef<HTMLDivElement>(null);
 
-  // Input Modes (File System vs Library Dropdown)
   const [inputModes, setInputModes] = useState({
-    wordlist: 'file', // 'file' or 'library'
+    wordlist: 'file',
     wordlist2: 'file',
     rule: 'file',
     mask: 'file'
@@ -74,6 +87,16 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
 
   useEffect(() => {
     fetchDevices();
+  }, []);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (hashDropdownRef.current && !hashDropdownRef.current.contains(event.target as Node)) {
+        setIsHashSearchOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
   const handleScanResources = async () => {
@@ -118,7 +141,6 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
       if (file) {
         setDetecting(true);
         try {
-          // If remote, upload first
           let targetPath = (file as any).path;
           if (!targetPath) {
              const formData = new FormData();
@@ -157,12 +179,19 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
     parts.push(`-a ${config.attackMode}`);
     parts.push(`-w ${config.workloadProfile}`);
     
+    // Username
+    if (config.username) parts.push('--username');
+    // Separator
+    if (config.separator) parts.push(`--separator='${config.separator}'`);    
     if (config.devices) parts.push(`-d ${config.devices}`);
-
     if (config.optimizedKernel) parts.push('-O');
     if (config.remove) parts.push('--remove');
     if (config.potfileDisable) parts.push('--potfile-disable');
     if (config.hwmonDisable) parts.push('--hwmon-disable');
+    if (config.hexSalt) parts.push('--hex-salt');
+    if (config.hexCharset) parts.push('--hex-charset');
+    if (config.markovThreshold && config.markovThreshold > 0) parts.push(`--markov-threshold=${config.markovThreshold}`);
+
     parts.push('--status-timer', config.statusTimer.toString());
     
     if (config.backendDisableOpenCL) parts.push('--backend-ignore-opencl'); 
@@ -171,7 +200,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
     if (config.keepGuessing) parts.push('--keep-guessing');
     if (config.logfileDisable) parts.push('--logfile-disable');
     if (config.force) parts.push('--force');
-    
+	
     if (config.skip > 0) parts.push(`-s ${config.skip}`);
     if (config.bitmapMax !== 24) parts.push(`--bitmap-max=${config.bitmapMax}`);
     if (config.spinDamp !== 100) parts.push(`--spin-damp=${config.spinDamp}`);
@@ -184,6 +213,10 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
         if (config.incrementMax) parts.push(`--increment-max=${config.incrementMax}`);
         if (config.incrementInverse) parts.push('--increment-inverse');
     }
+
+    // Rule Injection (Left/Right)
+    if (config.ruleLeft) parts.push(`-j '${config.ruleLeft}'`);
+    if (config.ruleRight) parts.push(`-k '${config.ruleRight}'`);
 
     parts.push(config.targetPath || '[target]');
 
@@ -223,45 +256,45 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
     }
   }, [commandString, isManualMode]);
 
+  const filteredHashTypes = useMemo(() => {
+      if (!hashSearchQuery) return HASH_TYPES;
+      const q = hashSearchQuery.toLowerCase();
+      return HASH_TYPES.filter(h => 
+        h.name.toLowerCase().includes(q) || 
+        h.id.toString().includes(q)
+      );
+  }, [hashSearchQuery]);
+
+  const selectedHashObject = useMemo(() => {
+      return HASH_TYPES.find(h => h.id.toString() === config.hashType) || { id: config.hashType, name: 'Unknown' };
+  }, [config.hashType]);
+
   const handleCopy = () => {
     navigator.clipboard.writeText(isManualMode ? manualCommand : commandString);
   };
 
   const handleRun = () => {
-    if (isManualMode) {
-      onStart(manualCommand);
-    } else {
-      onStart();
-    }
+    if (isManualMode) onStart(manualCommand);
+    else onStart();
   };
 
-  const handleFilePick = (field: keyof IConfig, accept?: string) => {
+  const handleFilePick = (field: keyof ExtendedConfig, accept?: string) => {
     const input = document.createElement('input');
     input.type = 'file';
     if (accept) input.accept = accept;
-    
     input.onchange = async (e: any) => {
       const file = e.target.files[0];
       if (file) {
         const directPath = (file as any).path;
-        
         if (directPath) {
-          // Electron Mode: We have the path
           setConfig({ ...config, [field]: directPath });
         } else {
-          // Browser/Remote Mode: Must upload first
           setUploadingField(field as string);
           try {
             const formData = new FormData();
             formData.append('file', file);
-            
-            const res = await fetch(`${getSocketUrl()}/api/upload`, {
-                method: 'POST',
-                body: formData
-            });
-            
+            const res = await fetch(`${getSocketUrl()}/api/upload`, { method: 'POST', body: formData });
             if (!res.ok) throw new Error("Upload failed");
-            
             const data = await res.json();
             setConfig({ ...config, [field]: data.path });
           } catch (err) {
@@ -281,11 +314,9 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
     input.type = 'file';
     input.setAttribute('webkitdirectory', '');
     input.setAttribute('directory', '');
-    
     input.onchange = (e: any) => {
       const file = e.target.files[0];
       if (file) {
-        // Folders usually require Electron for meaningful path scanning
         const fullPath = (file as any).path;
         if (fullPath) {
             const dirPath = fullPath.substring(0, fullPath.lastIndexOf((window.navigator.userAgent.includes('Win') ? '\\' : '/')));
@@ -349,16 +380,21 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                     {ATTACK_MODES.map(m => <option key={m.id} value={m.id}>{m.id} - {m.name}</option>)}
                   </select>
                 </div>
-                <div>
+                
+                {/* SEARCHABLE HASH TYPE DROPDOWN */}
+                <div className="relative" ref={hashDropdownRef}>
                   <label className="block text-xs font-bold text-slate-500 mb-2 uppercase">{t('config_hash_type')}</label>
                   <div className="flex gap-2">
-                    <select 
-                      value={config.hashType}
-                      onChange={e => setConfig({...config, hashType: e.target.value})}
-                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm focus:border-indigo-500 outline-none font-mono transition-colors"
+                    <button 
+                        onClick={() => { setIsHashSearchOpen(!isHashSearchOpen); setHashSearchQuery(''); }}
+                        className="flex-1 flex items-center justify-between bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm hover:border-indigo-500 transition-colors"
                     >
-                      {HASH_TYPES.map(h => <option key={h.id} value={h.id}>{h.id.padEnd(6)} | {h.name}</option>)}
-                    </select>
+                        <span className="font-mono truncate mr-2">
+                            {selectedHashObject.id.padEnd(6)} | {selectedHashObject.name}
+                        </span>
+                        <ChevronDown size={14} className="text-slate-500" />
+                    </button>
+                    
                     <button 
                       onClick={handleAutoDetect}
                       disabled={detecting}
@@ -368,7 +404,74 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                       {detecting ? <Loader2 className="animate-spin" size={16}/> : <Wand2 size={16} />}
                     </button>
                   </div>
+
+                  {isHashSearchOpen && (
+                      <div className="absolute top-full left-0 w-full mt-2 bg-slate-900 border border-slate-700 rounded-lg shadow-2xl z-50 overflow-hidden flex flex-col max-h-[300px] animate-in slide-in-from-top-2 fade-in duration-200">
+                          <div className="p-2 border-b border-slate-700 flex items-center gap-2 bg-slate-950 sticky top-0">
+                              <Search size={14} className="text-slate-500" />
+                              <input 
+                                  autoFocus
+                                  type="text" 
+                                  placeholder="Search ID or Name (e.g. 1000, NTLM)..." 
+                                  value={hashSearchQuery}
+                                  onChange={(e) => setHashSearchQuery(e.target.value)}
+                                  className="w-full bg-transparent border-none outline-none text-xs text-white placeholder-slate-600 font-mono"
+                              />
+                              {hashSearchQuery && (
+                                  <button onClick={() => setHashSearchQuery('')} className="text-slate-500 hover:text-white"><X size={14}/></button>
+                              )}
+                          </div>
+                          <div className="overflow-y-auto flex-1 custom-scrollbar">
+                              {filteredHashTypes.length === 0 ? (
+                                  <div className="p-4 text-center text-xs text-slate-500 italic">No matching hash types found.</div>
+                              ) : (
+                                  filteredHashTypes.map(h => (
+                                      <button 
+                                          key={h.id}
+                                          onClick={() => {
+                                              setConfig({ ...config, hashType: h.id });
+                                              setIsHashSearchOpen(false);
+                                              setHashSearchQuery('');
+                                          }}
+                                          className={`w-full text-left px-3 py-2 text-xs font-mono hover:bg-indigo-600 hover:text-white transition-colors border-b border-slate-800/50 flex items-center gap-3 ${config.hashType === h.id ? 'bg-indigo-900/30 text-indigo-300' : 'text-slate-300'}`}
+                                      >
+                                          <span className="opacity-50 w-12 shrink-0">{h.id}</span>
+                                          <span className="truncate">{h.name}</span>
+                                      </button>
+                                  ))
+                              )}
+                          </div>
+                      </div>
+                  )}
                 </div>
+             </div>
+
+             {/* USERNAME & SEPARATOR */}
+             <div className="grid grid-cols-2 gap-4 pt-2">
+                 <label className="flex items-center gap-2 p-2 bg-slate-950 border border-slate-800 rounded-lg cursor-pointer hover:border-indigo-500/50 transition-colors">
+                     <div className="p-1.5 bg-slate-900 rounded-md text-slate-400"><User size={14} /></div>
+                     <div className="flex-1">
+                         <div className="flex items-center gap-2">
+                            <input type="checkbox" checked={!!config.username} onChange={(e) => setConfig({...config, username: e.target.checked})} className="w-4 h-4 rounded border-slate-700 bg-slate-900 checked:bg-indigo-600 focus:ring-indigo-500/20" />
+                            <span className="text-xs font-bold text-slate-300">Hashes have Usernames</span>
+                         </div>
+                     </div>
+                 </label>
+                 
+                 <div className="flex items-center gap-2 p-2 bg-slate-950 border border-slate-800 rounded-lg">
+                     <div className="p-1.5 bg-slate-900 rounded-md text-slate-400"><Divide size={14} /></div>
+                     <div className="flex-1">
+                         <span className="block text-[10px] font-bold text-slate-500 uppercase mb-0.5">Separator Char</span>
+                         <input 
+                            type="text" 
+                            maxLength={1}
+                            placeholder="default: :"
+                            value={config.separator || ''} 
+                            onChange={(e) => setConfig({...config, separator: e.target.value})} 
+                            className="w-full bg-transparent border-none text-xs font-mono text-white placeholder-slate-600 focus:ring-0 p-0 h-4" 
+                         />
+                     </div>
+                 </div>
              </div>
 
              <div className="bg-slate-950/50 rounded-lg p-4 border border-slate-800 space-y-4">
@@ -376,8 +479,8 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                 
                 {showWordlistInput && (
                   <>
-                    <div>
-                      <div className="flex justify-between items-center mb-2">
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center mb-1">
                         <label className="text-xs font-bold text-slate-500">
                           {config.attackMode === 1 ? t('config_wordlist_left') : t('config_wordlist')}
                         </label>
@@ -408,11 +511,17 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                             </button>
                           </div>
                       )}
+                      
+                      {/* Rule Injection -j */}
+                      <div className="flex items-center gap-2 pl-2 border-l-2 border-slate-800">
+                          <span className="text-[10px] font-mono text-indigo-400 whitespace-nowrap">-j</span>
+                          <input type="text" value={config.ruleLeft || ''} onChange={(e) => setConfig({...config, ruleLeft: e.target.value})} placeholder="Inject rule for this wordlist (e.g. '$!')" className="w-full bg-slate-950/50 border-b border-slate-800 text-[10px] text-slate-300 px-2 py-1 focus:border-indigo-500 outline-none font-mono" />
+                      </div>
                     </div>
 
                     {config.attackMode === 1 && (
-                      <div>
-                         <div className="flex justify-between items-center mb-2">
+                      <div className="space-y-2 mt-4">
+                         <div className="flex justify-between items-center mb-1">
                             <label className="text-xs font-bold text-slate-500">{t('config_wordlist_right')}</label>
                             <button onClick={() => toggleInputMode('wordlist2')} className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-white">
                                {inputModes.wordlist2 === 'library' ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
@@ -435,6 +544,11 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                                </button>
                              </div>
                          )}
+                         {/* Rule Injection -k */}
+                         <div className="flex items-center gap-2 pl-2 border-l-2 border-slate-800">
+                              <span className="text-[10px] font-mono text-indigo-400 whitespace-nowrap">-k</span>
+                              <input type="text" value={config.ruleRight || ''} onChange={(e) => setConfig({...config, ruleRight: e.target.value})} placeholder="Inject rule for right wordlist" className="w-full bg-slate-950/50 border-b border-slate-800 text-[10px] text-slate-300 px-2 py-1 focus:border-indigo-500 outline-none font-mono" />
+                          </div>
                       </div>
                     )}
                     
@@ -517,7 +631,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                         {config.increment && (
                              <div className="grid grid-cols-2 gap-4 pl-6 animate-in fade-in slide-in-from-top-1">
                                 <div><label className="block text-[10px] font-bold text-slate-500 mb-1">{t('config_increment_min')}</label><input type="number" min="1" value={config.incrementMin} onChange={(e) => setConfig({...config, incrementMin: parseInt(e.target.value)})} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 focus:border-indigo-500 outline-none" placeholder="1" /></div>
-                                <div><label className="block text-[10px] font-bold text-slate-500 mb-1">{t('config_increment_max')}</label><input type="number" min="1" value={config.incrementMax} onChange={(e) => setConfig({...config, incrementMax: parseInt(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 focus:border-indigo-500 outline-none" placeholder="8" /></div>
+                                <div><label className="block text-[10px] font-bold text-slate-500 mb-1">{t('config_increment_max')}</label><input type="number" min="1" value={config.incrementMax} onChange={(e) => setConfig({...config, incrementMax: parseInt(e.target.value)})} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 focus:border-indigo-500 outline-none" placeholder="8" /></div>
                              </div>
                         )}
                       </div>
@@ -560,6 +674,24 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, setConfig, onStart, o
                   <div><label className="block text-xs font-bold text-slate-500 mb-2">{t('config_bitmap')}</label><input type="number" value={config.bitmapMax} onChange={e => setConfig({...config, bitmapMax: parseInt(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-white" /></div>
                   <div><label className="block text-xs font-bold text-slate-500 mb-2">{t('config_spin')}</label><input type="number" value={config.spinDamp} onChange={e => setConfig({...config, spinDamp: parseInt(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-white" /></div>
                </div>
+               
+               {/* Hex/Markov */}
+               <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4 border-t border-slate-800">
+                  <div className="space-y-3">
+                     <label className="flex items-center gap-2 cursor-pointer"><input type="checkbox" checked={!!config.hexSalt} onChange={e => setConfig({...config, hexSalt: e.target.checked})} className="w-4 h-4 rounded border-slate-700 bg-slate-950 checked:bg-indigo-600" /><span className="text-xs text-slate-300 font-bold">Assume Hex Salts (--hex-salt)</span></label>
+                     <label className="flex items-center gap-2 cursor-pointer"><input type="checkbox" checked={!!config.hexCharset} onChange={e => setConfig({...config, hexCharset: e.target.checked})} className="w-4 h-4 rounded border-slate-700 bg-slate-950 checked:bg-indigo-600" /><span className="text-xs text-slate-300 font-bold">Assume Hex Charset (--hex-charset)</span></label>
+                  </div>
+                  <div>
+                      <label className="block text-xs font-bold text-slate-500 mb-2">Markov Threshold</label>
+                      <div className="flex gap-2 items-center">
+                          <input type="number" min="0" value={config.markovThreshold || 0} onChange={e => setConfig({...config, markovThreshold: parseInt(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-white placeholder-slate-600" placeholder="0 (Disabled)" />
+                          <div title="Higher values use more memory">
+                              <AlertTriangle size={16} className="text-amber-500/50" />
+                          </div>
+                      </div>
+                  </div>
+               </div>
+
                <div className="grid grid-cols-2 md:grid-cols-3 gap-4 pt-4 border-t border-slate-800">{[{ label: 'Ignore OpenCL', key: 'backendDisableOpenCL' }, { label: 'Ignore CUDA', key: 'backendIgnoreCuda' }, { label: 'Keep Guessing', key: 'keepGuessing' }, { label: 'Disable Self-Test', key: 'selfTestDisable' }, { label: 'Disable Logfile', key: 'logfileDisable' }, { label: 'Force', key: 'force' }].map((opt: any) => (<label key={opt.key} className="flex items-center gap-2 cursor-pointer"><input type="checkbox" checked={(config as any)[opt.key]} onChange={e => setConfig({...config, [opt.key]: e.target.checked})} className="w-3 h-3 rounded border-slate-700 bg-slate-950 checked:bg-indigo-600" /><span className="text-xs text-slate-400 hover:text-white">{opt.label}</span></label>))}</div>
             </div>
           )}

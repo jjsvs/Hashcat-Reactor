@@ -34,8 +34,7 @@ function startServer() {
 
   const serverPath = path.join(backendDir, 'server.js');
   
-  // 2. Calculate Frontend Path (Critical Fix)
-  // This resolves to the absolute path of 'dist', even inside app.asar
+  // 2. Calculate Frontend Path 
   const frontendDir = path.join(__dirname, 'dist'); 
 
   console.log(`[Electron] Launching server from: ${serverPath}`);
@@ -47,7 +46,7 @@ function startServer() {
     IS_ELECTRON: 'true',
     USER_DATA_PATH: app.getPath('userData'), 
     RESOURCES_PATH: process.resourcesPath,
-    FRONTEND_BUILD_PATH: frontendDir // Pass this to server.js
+    FRONTEND_BUILD_PATH: frontendDir 
   };
 
   try {
