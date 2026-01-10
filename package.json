@@ -1,6 +1,6 @@
 {
   "name": "hashcat-reactor",
-  "version": "1.0.4",
+  "version": "1.0.6",
   "description": "Hashcat Reactor GUI",
   "main": "electron.js",
   "scripts": {

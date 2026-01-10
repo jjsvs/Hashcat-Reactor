@@ -15,7 +15,7 @@ let pty;
 try {
     pty = require('node-pty');
 } catch (e) {
-    console.warn("node-pty not found. Interactive terminal will not work.");
+    console.warn("node-pty not found. Interactive terminal and Pause/Resume will not work.");
 }
 
 const app = express();
@@ -55,12 +55,20 @@ const getJohnPath = () => {
     return path.join(__dirname, 'john', platform);
 };
 
+// --- PRINCE PROCESSOR PATH ---
+const getPrincePath = () => {
+    const binary = process.platform === 'win32' ? 'pp64.exe' : 'pp64.bin';
+    if (IS_ELECTRON && RESOURCES_PATH) {
+        return path.join(RESOURCES_PATH, 'backend', 'princeprocessor', binary);
+    }
+    return path.join(__dirname, 'princeprocessor', binary);
+};
+
 // --- HELPER: HASH CLEANER ---
 const cleanHash = (line) => {
     line = line.trim();
     if (!line) return null;
 
-    // 1. Define Known Structures
     const formats = [
         { start: '$zip2$', end: '$/zip2$' },
         { start: '$pkzip2$', end: '$/pkzip2$' },
@@ -103,58 +111,42 @@ const cleanHash = (line) => {
         const startIdx = line.indexOf(fmt.start);
         if (startIdx !== -1) {
             let dirtyHash = line.substring(startIdx);
-
-            // Case A: Specific End Tag (e.g. ZIP)
             if (fmt.end) {
                 const endIdx = dirtyHash.indexOf(fmt.end);
                 if (endIdx !== -1) {
                     return dirtyHash.substring(0, endIdx + fmt.end.length);
                 }
             }
-            
-            // Case B: No End Tag (Split by next colon)
             const parts = dirtyHash.split(':');
             return parts[0]; 
         }
     }
-
-    // 2. Fallback for Generic Hashes
     const parts = line.split(':');
     if (parts.length > 1) {
         const dollarPart = parts.find(p => p.startsWith('$'));
         if (dollarPart) return dollarPart;
-
         let candidate = parts[1];
         if (parts[0].length === 1) candidate = parts[2] || parts[1]; 
         return candidate;
     }
-
     return line; 
 };
 
 app.post('/api/tools/file2john', upload.single('file'), (req, res) => {
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
-
     const johnDir = getJohnPath();
     const type = req.body.type || 'auto';
     const filename = req.file.originalname.toLowerCase();
-    
     let exe = '';
 
-    // --- STANDARD MAPPING ---
-    // Archives
     if (type === 'zip' || (type === 'auto' && filename.endsWith('.zip'))) exe = 'zip2john.exe';
     else if (type === '7z' || (type === 'auto' && filename.endsWith('.7z'))) exe = '7z2john.exe';
     else if (type === 'rar' || (type === 'auto' && filename.endsWith('.rar'))) exe = 'rar2john.exe';
     else if (type === 'dmg' || (type === 'auto' && filename.endsWith('.dmg'))) exe = 'dmg2john.exe';
-    
-    // Docs & Office
     else if (type === 'office' || (type === 'auto' && (filename.endsWith('.docx') || filename.endsWith('.xlsx') || filename.endsWith('.doc') || filename.endsWith('.xls') || filename.endsWith('.ppt') || filename.endsWith('.pptx')))) exe = 'office2john/office2john.exe';
     else if (type === 'pdf' || (type === 'auto' && filename.endsWith('.pdf'))) exe = 'pdf2john/pdf2john.exe';
     else if (type === 'libreoffice' || (type === 'auto' && (filename.endsWith('.odt') || filename.endsWith('.ods') || filename.endsWith('.odp') || filename.endsWith('.odg')))) exe = 'libreoffice2john/libreoffice2john.exe';
     else if (type === 'staroffice' || (type === 'auto' && (filename.endsWith('.sdc') || filename.endsWith('.sdw') || filename.endsWith('.sda') || filename.endsWith('.sdd')))) exe = 'staroffice2john/staroffice2john.exe';
-    
-    // Keys & Managers
     else if (type === 'putty' || (type === 'auto' && filename.endsWith('.ppk'))) exe = 'putty2john.exe';
     else if (type === 'pfx' || (type === 'auto' && filename.endsWith('.pfx'))) exe = 'pfx2john.exe';
     else if (type === 'gpg' || (type === 'auto' && filename.endsWith('.gpg'))) exe = 'gpg2john.exe';
@@ -163,20 +155,15 @@ app.post('/api/tools/file2john', upload.single('file'), (req, res) => {
     else if (type === 'keychain' || (type === 'auto' && (filename.endsWith('.keychain') || filename.endsWith('.keychain-db')))) exe = 'keychain2john/keychain2john.exe';
     else if (type === 'keyring' || (type === 'auto' && filename.endsWith('.keyring'))) exe = 'keyring2john/keyring2john.exe';
     else if (type === 'keystore' || (type === 'auto' && (filename.endsWith('.jks') || filename.endsWith('.keystore')))) exe = 'keystore2john/keystore2john.exe';
-    
-    // Wallets & Crypto
     else if (type === 'ethereum') exe = 'ethereum2john/ethereum2john.exe';
     else if (type === 'monero' || (type === 'auto' && filename.endsWith('.keys'))) exe = 'monero2john/monero2john.exe';
     else if (type === 'electrum' || (type === 'auto' && (filename.includes('electrum') || filename === 'default_wallet'))) exe = 'electrum2john/electrum2john.exe';
     else if (type === 'bitlocker') exe = 'bitlocker2john.exe';
-
-    // System
     else if (type === 'telegram' || (type === 'auto' && (filename.includes('map') || filename.includes('telegram')))) exe = 'telegram2john/telegram2john.exe';
     else if (type === 'android' || (type === 'auto' && filename.endsWith('.ab'))) exe = 'androidbackup2john.exe';
     else if (type === 'mozilla' || (type === 'auto' && filename === 'key4.db')) exe = 'mozilla2john/mozilla2john.exe';
     else if (type === 'itunes' || (type === 'auto' && filename === 'manifest.plist')) exe = 'itunes_backup2john.exe';
     else if (type === 'filezilla' || (type === 'auto' && (filename.includes('filezilla') || (filename.endsWith('.xml') && filename.includes('server'))))) exe = 'filezilla2john/filezilla2john.exe';
-
     else if (type === 'apex' || (type === 'auto' && filename.includes('apex'))) exe = 'apex2john/apex2john.exe';
     else if (type === 'applenotes' || (type === 'auto' && (filename.includes('notestore') || filename.endsWith('.sqlite')))) exe = 'applenotes2john/applenotes2john.exe';
     else if (type === 'aruba' || (type === 'auto' && (filename.includes('aruba') || filename.endsWith('.cfg')))) exe = 'aruba2john/aruba2john.exe';
@@ -187,10 +174,7 @@ app.post('/api/tools/file2john', upload.single('file'), (req, res) => {
     if (!exe) return res.status(400).json({ message: 'Unsupported file type.' });
 
     const binaryPath = path.join(johnDir, exe);
-    
-    if (!fs.existsSync(binaryPath)) {
-        return res.status(500).json({ message: 'Binary not found', details: binaryPath });
-    }
+    if (!fs.existsSync(binaryPath)) return res.status(500).json({ message: 'Binary not found', details: binaryPath });
 
     const proc = spawn(binaryPath, [req.file.path]);
     let stdout = '';
@@ -201,36 +185,25 @@ app.post('/api/tools/file2john', upload.single('file'), (req, res) => {
 
     proc.on('close', (code) => {
         setTimeout(() => { try { fs.unlinkSync(req.file.path); } catch(e) {} }, 500);
-
         if (!stdout && stderr) {
             if (stdout.length < 5) return res.status(500).json({ message: 'Extraction failed', details: stderr });
         }
-
         const lines = stdout.split(/\r?\n/).filter(line => line.trim().length > 0);
         const extractedHashes = [];
-
         lines.forEach(line => {
             const cleaned = cleanHash(line);
-            if (cleaned && cleaned.length > 10) {
-                extractedHashes.push(cleaned);
-            }
+            if (cleaned && cleaned.length > 10) extractedHashes.push(cleaned);
         });
-
         const uniqueHashes = [...new Set(extractedHashes)];
         res.json({ success: true, hashes: uniqueHashes, raw: stdout });
     });
     
-    proc.on('error', (err) => {
-        res.status(500).json({ message: 'Spawn error', error: err.message });
-    });
+    proc.on('error', (err) => res.status(500).json({ message: 'Spawn error', error: err.message }));
 });
 
-// --- REMOTE ACCESS / ZROK STATE ---
 let zrokProcess = null;
 let remoteConfig = { active: false, url: null, username: '', password: '' };
-
 let staticPath = process.env.FRONTEND_BUILD_PATH;
-
 if (!staticPath || !fs.existsSync(staticPath)) {
     const parentTry = path.join(__dirname, '../../dist'); 
     if (fs.existsSync(parentTry)) staticPath = parentTry;
@@ -239,10 +212,10 @@ if (!staticPath || !fs.existsSync(staticPath)) {
         if (fs.existsSync(currentTry)) staticPath = currentTry;
     }
 }
-
 if (staticPath && fs.existsSync(staticPath)) app.use(express.static(staticPath));
 
-const activeSessions = {};
+// Stores session objects. 
+const activeSessions = {}; 
 let sessionCounter = 0; 
 let currentGlobalPower = 0;
 
@@ -377,31 +350,234 @@ app.post('/api/remote/stop', (req, res) => {
     res.json({ success: true });
 });
 
-app.post('/api/escrow/proxy', (req, res) => {
-    const options = { hostname: 'hashes.com', path: '/en/api/founds', method: 'POST', headers: { 'Content-Type': req.headers['content-type'], 'Host': 'hashes.com' } };
-    const proxyReq = https.request(options, (proxyRes) => {
+// --- PROXY HELPER FUNCTION ---
+const handleProxyRequest = (targetUrl, res, attempt = 1) => {
+    if (attempt > 5) return res.status(500).json({ error: "Too many redirects" });
+    let parsed;
+    try {
+        parsed = new URL(targetUrl);
+        if (!parsed.hostname.endsWith('hashes.com')) {
+             return res.status(403).json({ error: "Only hashes.com allowed" });
+        }
+    } catch (e) { return res.status(400).json({ error: "Invalid URL" }); }
+
+    const adapter = parsed.protocol === 'https:' ? https : http;
+    const reqOptions = { 
+        headers: { 
+            'User-Agent': 'python-requests/2.28.1', 
+            'Accept': '*/*',
+            'Accept-Encoding': 'identity', 
+            'Connection': 'keep-alive',
+            'Host': parsed.hostname 
+        } 
+    };
+
+    const proxyReq = adapter.get(targetUrl, reqOptions, (proxyRes) => {
+        if (proxyRes.statusCode >= 300 && proxyRes.statusCode < 400 && proxyRes.headers.location) {
+            let redirectUrl = proxyRes.headers.location;
+            if (!redirectUrl.startsWith('http')) {
+                const origin = `${parsed.protocol}//${parsed.hostname}`;
+                redirectUrl = redirectUrl.startsWith('/') ? `${origin}${redirectUrl}` : `${origin}/${redirectUrl}`;
+            }
+            return handleProxyRequest(redirectUrl, res, attempt + 1);
+        }
         res.status(proxyRes.statusCode);
-        res.set(proxyRes.headers);
+        const headersToForward = ['content-type', 'content-length', 'content-disposition', 'last-modified', 'etag'];
+        headersToForward.forEach(h => { if(proxyRes.headers[h]) res.setHeader(h, proxyRes.headers[h]); });
         proxyRes.pipe(res);
     });
-    proxyReq.on('error', (e) => { console.error('Proxy Post Error:', e); res.status(500).json({ error: e.message }); });
-    req.pipe(proxyReq);
-});
+    proxyReq.on('error', (e) => { 
+        console.error('Proxy Get Error:', e); 
+        if (!res.headersSent) res.status(500).json({ error: e.message }); 
+    });
+};
 
 app.get('/api/escrow/proxy', (req, res) => {
     const targetUrl = req.query.url;
     if (!targetUrl) return res.status(400).json({ error: "Missing url parameter" });
+    handleProxyRequest(targetUrl, res);
+});
+
+// --- POST PROXY ---
+app.post('/api/escrow/proxy', (req, res) => {
+   
+    if (req.headers['content-type'] && req.headers['content-type'].includes('application/json')) {
+        const { key, algo, fileContent } = req.body;
+        
+        if (!key || !algo || !fileContent) {
+             return res.status(400).json({ success: false, message: "Missing fields in JSON proxy request" });
+        }
+
+        const boundary = '----ReactBoundary' + Math.random().toString(36).slice(2);
+        
+        let payload = '';
+        payload += `--${boundary}\r\nContent-Disposition: form-data; name="key"\r\n\r\n${key}\r\n`;
+        payload += `--${boundary}\r\nContent-Disposition: form-data; name="algo"\r\n\r\n${algo}\r\n`;
+        payload += `--${boundary}\r\nContent-Disposition: form-data; name="userfile"; filename="founds.txt"\r\nContent-Type: text/plain\r\n\r\n${fileContent}\r\n`;
+        payload += `--${boundary}--\r\n`;
+
+        const options = {
+            hostname: 'hashes.com',
+            path: '/en/api/founds',
+            method: 'POST',
+            headers: {
+                'Content-Type': `multipart/form-data; boundary=${boundary}`,
+                'Content-Length': Buffer.byteLength(payload),
+                'User-Agent': 'python-requests/2.28.1',
+                'Accept': '*/*',
+                'Connection': 'close'
+            }
+        };
+
+        const proxyReq = https.request(options, (proxyRes) => {
+            let data = '';
+            proxyRes.on('data', chunk => data += chunk);
+            proxyRes.on('end', () => {
+                try {
+                    const json = JSON.parse(data);
+                    res.json(json);
+                } catch(e) {
+                    res.status(proxyRes.statusCode).send(data);
+                }
+            });
+        });
+        
+        proxyReq.on('error', e => {
+            console.error("Proxy JSON Error:", e);
+            res.status(500).json({ error: e.message });
+        });
+        
+        proxyReq.write(payload);
+        proxyReq.end();
+        return;
+    }
+
+    const chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.on('end', () => {
+        const bodyBuffer = Buffer.concat(chunks);
+        const options = { 
+            hostname: 'hashes.com', 
+            path: '/en/api/founds', 
+            method: 'POST', 
+            headers: { 
+                'Content-Type': req.headers['content-type'],
+                'Content-Length': bodyBuffer.length, 
+                'Host': 'hashes.com',
+                'User-Agent': 'python-requests/2.28.1',
+                'Origin': 'https://hashes.com',
+                'Referer': 'https://hashes.com/',
+                'Accept': '*/*',
+                'Connection': 'close'
+            } 
+        };
+
+        const proxyReq = https.request(options, (proxyRes) => {
+            res.status(proxyRes.statusCode);
+            if(proxyRes.headers['content-type']) res.set('content-type', proxyRes.headers['content-type']);
+            proxyRes.pipe(res);
+        });
+
+        proxyReq.on('error', (e) => { 
+            console.error('Proxy Post Error:', e); 
+            res.status(500).json({ error: e.message }); 
+        });
+
+        proxyReq.write(bodyBuffer);
+        proxyReq.end();
+    });
+});
+
+app.post('/api/tools/prince', upload.single('wordlist'), (req, res) => {
+    const { source, pwMin, pwMax, elemMin, elemMax, limit, casePermute, outputName } = req.body;
+    const princeBin = getPrincePath();
+    if (!fs.existsSync(princeBin)) return res.status(500).json({ message: 'PRINCE binary not found on server.' });
+
+    const jobUuid = uuid();
+    const finalOutputName = outputName ? 
+        (outputName.endsWith('.txt') ? outputName : `${outputName}.txt`) : 
+        `prince_${jobUuid}.txt`;
+    const outputPath = path.join(uploadDir, finalOutputName);
+
+    let inputPath = '';
+    let tempInputCreated = false;
+
     try {
-        const parsed = new URL(targetUrl);
-        if (!parsed.hostname.includes('hashes.com')) return res.status(403).json({ error: "Only hashes.com allowed" });
-    } catch (e) { return res.status(400).json({ error: "Invalid URL" }); }
-    const reqOptions = { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Accept': '*/*' } };
-    https.get(targetUrl, reqOptions, (proxyRes) => {
-        if (proxyRes.headers['content-type']) res.setHeader('Content-Type', proxyRes.headers['content-type']);
-        if (proxyRes.headers['content-length']) res.setHeader('Content-Length', proxyRes.headers['content-length']);
-        res.status(proxyRes.statusCode);
-        proxyRes.pipe(res);
-    }).on('error', (e) => { console.error('Proxy Get Error:', e); res.status(500).json({ error: e.message }); });
+        if (source === 'upload' && req.file) {
+            inputPath = req.file.path;
+        } else if (source === 'potfile' || source === 'session') {
+            const sourcePot = source === 'potfile' ? POTFILE_PATH : path.join(uploadDir, 'reactor.potfile');
+            if (!fs.existsSync(sourcePot)) return res.status(400).json({ message: 'Selected potfile source is empty or missing.' });
+            const potContent = fs.readFileSync(sourcePot, 'utf-8');
+            const lines = potContent.split('\n');
+            const plaintexts = new Set();
+            lines.forEach(line => {
+                const parsed = parsePotfileLine(line); 
+                if (parsed && parsed.plain) plaintexts.add(parsed.plain);
+            });
+            if (plaintexts.size === 0) return res.status(400).json({ message: 'No plaintexts found in potfile to process.' });
+            inputPath = path.join(uploadDir, `prince_in_${jobUuid}.txt`);
+            fs.writeFileSync(inputPath, Array.from(plaintexts).join('\n'));
+            tempInputCreated = true;
+        } else {
+             return res.status(400).json({ message: 'Invalid input source.' });
+        }
+
+        const args = [];
+        if (pwMin) args.push(`--pw-min=${pwMin}`);
+        if (pwMax) args.push(`--pw-max=${pwMax}`);
+        if (elemMin) args.push(`--elem-cnt-min=${elemMin}`);
+        if (elemMax) args.push(`--elem-cnt-max=${elemMax}`);
+        if (limit) args.push(`--limit=${limit}`);
+        if (casePermute === 'true') args.push('--case-permute');
+        
+        args.push('-o', outputPath);
+        args.push(inputPath);
+
+        const proc = spawn(princeBin, args);
+        let errorOut = '';
+        proc.stderr.on('data', (d) => errorOut += d.toString());
+        
+        proc.on('close', (code) => {
+            if (tempInputCreated && fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+            if (code === 0 && fs.existsSync(outputPath)) {
+                res.json({ 
+                    success: true, 
+                    message: 'Wordlist generated successfully.', 
+                    downloadUrl: `/api/download/check-result/${finalOutputName}`, 
+                    filename: finalOutputName
+                });
+            } else {
+                res.status(500).json({ message: 'PRINCE process failed.', details: errorOut || `Exit code ${code}` });
+            }
+        });
+    } catch (e) {
+        if (tempInputCreated && fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+        res.status(500).json({ message: e.message });
+    }
+});
+
+app.post('/api/session/action', (req, res) => {
+    const { sessionId, action } = req.body;
+    if (!sessionId || !action) return res.status(400).json({ message: 'Missing sessionId or action' });
+    
+    const session = activeSessions[sessionId];
+    if (!session || !session.process) return res.status(404).json({ message: 'Session not active' });
+    
+    try {
+        if (session.type === 'pty') {
+            session.process.write(action);
+        } else {
+            session.process.stdin.write(action + '\n');
+            if (action === 'p' || action === 'r') {
+                io.emit('log', { sessionId, level: 'WARN', message: 'Interactive command sent via pipe. If Hashcat ignores this, node-pty is required.' });
+            }
+        }
+        io.emit('log', { sessionId, level: 'CMD', message: `Sent interactive command: ${action}` });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ message: 'Failed to send command to process', error: e.message });
+    }
 });
 
 app.post('/api/system/devices', (req, res) => {
@@ -489,35 +665,22 @@ app.post('/api/identify', (req, res) => {
 app.post('/api/session/start', (req, res) => {
   const { customCommand, targetPath, restore, sessionId: reqSessionId, ...config } = req.body;
   const { executable, cwd } = getHashcatConfig(); 
-  
   let sessionId = reqSessionId;
 
-  // --- RESTORE LOGIC ---
   if (restore) {
       if (!sessionId) {
           try {
-              
               if (fs.existsSync(cwd)) {
                   const files = fs.readdirSync(cwd).filter(f => f.endsWith('.restore'));
                   if (files.length > 0) {
-                      
-                      files.sort((a, b) => {
-                          return fs.statSync(path.join(cwd, b)).mtimeMs - fs.statSync(path.join(cwd, a)).mtimeMs;
-                      });
-                      
+                      files.sort((a, b) => fs.statSync(path.join(cwd, b)).mtimeMs - fs.statSync(path.join(cwd, a)).mtimeMs);
                       sessionId = files[0].replace(/\.restore$/, '');
                   }
               }
-          } catch (e) {
-              console.error("Error finding restore file in CWD:", e);
-          }
+          } catch (e) {}
       }
-
-      if (!sessionId) {
-          return res.status(400).json({ message: 'No restore file found in hashcat working directory.' });
-      }
+      if (!sessionId) return res.status(400).json({ message: 'No restore file found.' });
   } else {
-      // --- NEW SESSION LOGIC ---
       if (!sessionId) {
           sessionCounter++;
           sessionId = `s_${Date.now()}_${uuid()}`;
@@ -532,7 +695,8 @@ app.post('/api/session/start', (req, res) => {
           fs.copyFileSync(POTFILE_PATH, sessionPotFile);
           initialSize = fs.statSync(sessionPotFile).size;
       } else { fs.writeFileSync(sessionPotFile, ''); }
-  } catch (e) { console.error("Error creating session potfile", e); }
+  } catch (e) {}
+  
   let args = [];
   if (restore) {
     args.push('--restore', '--status', '--status-timer', (config.statusTimer || 30).toString());
@@ -608,38 +772,13 @@ app.post('/api/session/start', (req, res) => {
       } catch (e) { console.error(`Error watching potfile ${sessionId}`, e); }
   };
   const potWatcher = fs.watchFile(sessionPotFile, { interval: 500 }, checkSessionPotfile);
-  try {
-    const child = spawn(executable, args, { cwd, stdio: 'pipe' });
-    activeSessions[sessionId] = { 
-        process: child, 
-        startTime: Date.now(), 
-        name: friendlyName, 
-        potFile: sessionPotFile,
-        stats: { 
-            recovered: 0, 
-            recoveredCount: 0,
-            total: 0, 
-            hashrateSum: 0, 
-            hashrateCount: 0, 
-            latestSpeeds: {},
-            powerSum: 0, 
-            powerReadings: 0
-        }
-    };
-    if (child.stdin) child.stdin.setEncoding('utf-8');
-    io.emit('session_started', { 
-        sessionId, 
-        name: friendlyName, 
-        target: targetPath ? path.basename(targetPath) : 'Manual Input',
-        hashType: config.hashType,
-        attackMode: config.attackMode
-    });
-    io.emit('session_status', { sessionId, status: 'RUNNING' });
-    io.emit('log', { sessionId, level: 'CMD', message: `[${friendlyName}] Started` });
-    
-    let stdoutBuffer = '';
-    const parseOutput = (data, isError = false) => {
-        stdoutBuffer += data.toString();
+  
+  let stdoutBuffer = '';
+  const parseOutput = (data, isError = false) => {
+        const rawStr = data.toString();
+        // eslint-disable-next-line no-control-regex
+        const cleanStr = rawStr.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '');
+        stdoutBuffer += cleanStr;
         let lines = stdoutBuffer.split('\n');
         stdoutBuffer = lines.pop(); 
         lines.forEach(line => {
@@ -707,10 +846,9 @@ app.post('/api/session/start', (req, res) => {
                 io.emit('stats_update', { sessionId, type: 'total', value: t });
             }
         });
-    };
-    child.stdout.on('data', d => parseOutput(d, false));
-    child.stderr.on('data', d => parseOutput(d, true));
-    child.on('close', (code) => {
+  };
+
+  const handleProcessExit = (code) => {
       let duration = 0;
       let finalStats = { recovered: 0, total: 0, avgHashrate: 0, avgPower: 0 };
       if (activeSessions[sessionId]) {
@@ -719,12 +857,7 @@ app.post('/api/session/start', (req, res) => {
           duration = (endTime - s.startTime) / 1000;
           const avg = s.stats.hashrateCount > 0 ? s.stats.hashrateSum / s.stats.hashrateCount : 0;
           const avgPwr = s.stats.powerReadings > 0 ? s.stats.powerSum / s.stats.powerReadings : 0;
-          finalStats = { 
-              recovered: s.stats.recoveredCount, 
-              total: s.stats.total, 
-              avgHashrate: avg,
-              avgPower: avgPwr 
-            };
+          finalStats = { recovered: s.stats.recoveredCount, total: s.stats.total, avgHashrate: avg, avgPower: avgPwr };
       }
       io.emit('log', { sessionId, level: code === 0 ? 'SUCCESS' : 'WARN', message: `Session ${friendlyName} exited with code ${code}` });
       io.emit('session_finished', { sessionId, duration, ...finalStats });
@@ -732,13 +865,56 @@ app.post('/api/session/start', (req, res) => {
       fs.unwatchFile(sessionPotFile);
       if (fs.existsSync(sessionPotFile)) { try { fs.unlinkSync(sessionPotFile); } catch(e) {} }
       if(activeSessions[sessionId]) delete activeSessions[sessionId];
-    });
-    child.on('error', (err) => {
-        io.emit('log', { sessionId, level: 'ERROR', message: err.message });
-        io.emit('session_status', { sessionId, status: 'ERROR' });
-        fs.unwatchFile(sessionPotFile);
-        if(activeSessions[sessionId]) delete activeSessions[sessionId];
-    });
+  };
+
+  try {
+    let child;
+    let type = 'spawn';
+
+    if (pty) {
+        try {
+            console.log(`[PTY] Spawning session ${sessionId} in pseudo-terminal.`);
+            child = pty.spawn(executable, args, { name: 'xterm-color', cols: 80, rows: 30, cwd: cwd, env: process.env });
+            type = 'pty';
+            child.onData((data) => parseOutput(data));
+            child.onExit(({ exitCode }) => handleProcessExit(exitCode));
+        } catch (ptyErr) {
+            console.error("PTY spawn failed, falling back to standard spawn", ptyErr);
+            child = null;
+        }
+    }
+
+    if (!child) {
+        console.log(`[SPAWN] Spawning session ${sessionId} with standard pipes.`);
+        child = spawn(executable, args, { cwd, stdio: 'pipe' });
+        if (child.stdin) child.stdin.setEncoding('utf-8');
+        child.stdout.on('data', d => parseOutput(d, false));
+        child.stderr.on('data', d => parseOutput(d, true));
+        child.on('close', handleProcessExit);
+    }
+
+    activeSessions[sessionId] = { 
+        process: child, 
+        type: type,
+        startTime: Date.now(), 
+        name: friendlyName, 
+        potFile: sessionPotFile,
+        stats: { recovered: 0, recoveredCount: 0, total: 0, hashrateSum: 0, hashrateCount: 0, latestSpeeds: {}, powerSum: 0, powerReadings: 0 }
+    };
+
+    io.emit('session_started', { sessionId, name: friendlyName, target: targetPath ? path.basename(targetPath) : 'Manual Input', hashType: config.hashType, attackMode: config.attackMode });
+    io.emit('session_status', { sessionId, status: 'RUNNING' });
+    io.emit('log', { sessionId, level: 'CMD', message: `[${friendlyName}] Started via ${type}` });
+    
+    if (type === 'spawn') {
+        child.on('error', (err) => {
+            io.emit('log', { sessionId, level: 'ERROR', message: err.message });
+            io.emit('session_status', { sessionId, status: 'ERROR' });
+            fs.unwatchFile(sessionPotFile);
+            if(activeSessions[sessionId]) delete activeSessions[sessionId];
+        });
+    }
+
     res.json({ success: true, sessionId });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
@@ -748,7 +924,10 @@ app.post('/api/session/stop', (req, res) => {
   const stopSession = (id) => {
       if(activeSessions[id]) {
           const s = activeSessions[id];
-          try { if(s.process) s.process.kill('SIGKILL'); } catch(e) {}
+          try { 
+              if (s.type === 'pty') s.process.kill(); 
+              else s.process.kill('SIGKILL'); 
+          } catch(e) {}
           if(s.potFile && fs.existsSync(s.potFile)) {
               fs.unwatchFile(s.potFile);
               try { fs.unlinkSync(s.potFile); } catch(e) {}
@@ -776,14 +955,27 @@ app.post('/api/session/stop', (req, res) => {
 app.post('/api/session/delete', (req, res) => {
     const { sessionId } = req.body;
     if (!sessionId) return res.status(400).json({ message: 'Session ID required' });
+    
     const sessionPot = path.join(uploadDir, `${sessionId}.potfile`);
-    if (fs.existsSync(sessionPot)) {
-        try { fs.unlinkSync(sessionPot); } catch(e) {}
-    }
+    if (fs.existsSync(sessionPot)) { try { fs.unlinkSync(sessionPot); } catch(e) {} }
+    
     if (activeSessions[sessionId]) {
        const s = activeSessions[sessionId];
-       try { if(s.process) s.process.kill('SIGKILL'); } catch(e) {}
+       try { 
+           if (s.type === 'pty') s.process.kill();
+           else s.process.kill('SIGKILL'); 
+       } catch(e) {}
        delete activeSessions[sessionId];
+    }
+    if (fs.existsSync(SESSIONS_PATH)) {
+        try {
+            let sessions = JSON.parse(fs.readFileSync(SESSIONS_PATH, 'utf-8'));
+            const initialLength = sessions.length;
+            sessions = sessions.filter(s => s.id !== sessionId);
+            if (sessions.length !== initialLength) {
+                fs.writeFileSync(SESSIONS_PATH, JSON.stringify(sessions, null, 2));
+            }
+        } catch (e) {}
     }
     io.emit('session_deleted', { sessionId });
     res.json({ success: true });
@@ -800,7 +992,7 @@ app.post('/api/target/check', async (req, res) => {
                 const parsed = parsePotfileLine(line);
                 if (parsed) potfileMap.set(parsed.hash, parsed.plain);
             }
-        } catch (e) { console.error("Error reading potfile map:", e); }
+        } catch (e) {}
     }
     const resultFilename = `check_result_${Date.now()}.txt`;
     const resultPath = path.join(uploadDir, resultFilename);

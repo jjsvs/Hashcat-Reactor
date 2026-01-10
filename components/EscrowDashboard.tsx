@@ -1,10 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { EscrowJob, EscrowAlgo, SessionStats } from '../types';
-import { getEscrowJobs, getAlgorithms } from '../services/geminiService';
-import { RefreshCw, Download, Search, UploadCloud, AlertTriangle, DollarSign, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Calendar, FileText, Filter, X, Loader2, Settings, Wallet, Zap, Save, Database, ArrowRight, BrainCircuit } from 'lucide-react';
+import { RefreshCw, Download, Search, UploadCloud, AlertTriangle, DollarSign, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Calendar, FileText, Filter, X, Loader2, Settings, Zap, Save, BrainCircuit, TrendingUp, BarChart3, Globe } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-// Updated Settings Interface
+// --- Types ---
 export interface AutoUploadSettings {
   enabled: boolean;
   threshold: number;
@@ -17,10 +16,29 @@ interface EscrowDashboardProps {
   initialAlgoId?: string;
   autoUploadSettings: AutoUploadSettings;
   onUpdateAutoUploadSettings: (settings: AutoUploadSettings) => void;
-  // Kept in interface to prevent parent component errors, even if unused internally now
   sessions: Record<string, SessionStats>;
   activeSessionId: string | null;
 }
+
+interface HistoryItem {
+  date: string; // YYYY-MM-DD
+  displayDate: string; // Formatted for X-Axis
+  usdValue: number; // Base USD value
+  convertedValue: number; // Value in selected currency
+  validHashes: number;
+  raw: { btc: number, xmr: number, ltc: number };
+}
+
+// Supported Currencies
+const CURRENCIES = [
+  { code: 'USD', symbol: '$', name: 'US Dollar' },
+  { code: 'EUR', symbol: '€', name: 'Euro' },
+  { code: 'GBP', symbol: '£', name: 'British Pound' },
+  { code: 'RUB', symbol: '₽', name: 'Russian Ruble' },
+  { code: 'INR', symbol: '₹', name: 'Indian Rupee' },
+  { code: 'CNY', symbol: '¥', name: 'Chinese Yuan' },
+  { code: 'JPY', symbol: '¥', name: 'Japanese Yen' },
+];
 
 const EscrowDashboard: React.FC<EscrowDashboardProps> = ({ 
   apiKey, 
@@ -33,14 +51,17 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
   activeSessionId
 }) => {
   const { t } = useTranslation();
+  
+  // --- STATE ---
   const [jobs, setJobs] = useState<EscrowJob[]>([]);
   const [algos, setAlgos] = useState<EscrowAlgo[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
-  // Balance State
+  // Balance & Currency State
   const [balances, setBalances] = useState<{ currency: string, amount: string, usd: string }[]>([]);
-  const [loadingBalance, setLoadingBalance] = useState(false);
+  const [selectedCurrency, setSelectedCurrency] = useState<string>(() => localStorage.getItem('reactor_currency') || 'USD');
+  const [exchangeRates, setExchangeRates] = useState<Record<string, number>>({ USD: 1 });
   
   // Filters & Pagination
   const [filterAlgo, setFilterAlgo] = useState('');
@@ -65,15 +86,23 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
   const [downloadProgress, setDownloadProgress] = useState<{ current: number, total: number, found: number } | null>(null);
   const [downloadLogs, setDownloadLogs] = useState<string[]>([]);
 
-  // Auto-Upload Settings Modal
+  // Auto-Upload Settings
   const [showAutoSettings, setShowAutoSettings] = useState(false);
   const [tempAutoSettings, setTempAutoSettings] = useState<AutoUploadSettings>(autoUploadSettings);
 
-  // Searchable Algo Dropdown State
+  // Searchable Algo Dropdown
   const [algoSearch, setAlgoSearch] = useState('');
   const [showAlgoList, setShowAlgoList] = useState(false);
   const algoListRef = useRef<HTMLDivElement>(null);
 
+  // History & Analytics
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [showAnalytics, setShowAnalytics] = useState(false);
+  const [hoveredChartPoint, setHoveredChartPoint] = useState<HistoryItem | null>(null);
+
+  // --- EFFECTS ---
+
+  // Click outside listener for Algo Dropdown
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (algoListRef.current && !algoListRef.current.contains(event.target as Node)) {
@@ -84,21 +113,48 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // Fetch Fiat Exchange Rates (USD base)
   useEffect(() => {
-    if (initialSubmissionData) {
-      setSubmissionContent(initialSubmissionData);
-    }
-  }, [initialSubmissionData]);
+    const fetchFiatRates = async () => {
+        try {
+            // Using a free, public API for standard fiat rates
+            const res = await fetch('https://open.er-api.com/v6/latest/USD');
+            if (res.ok) {
+                const data = await res.json();
+                if (data && data.rates) {
+                    setExchangeRates(data.rates);
+                }
+            }
+        } catch (e) {
+            console.warn("Failed to fetch fiat rates, defaulting to USD", e);
+        }
+    };
+    fetchFiatRates();
+  }, []);
 
+  // Handle Currency Selection Change
+  useEffect(() => {
+      localStorage.setItem('reactor_currency', selectedCurrency);
+  }, [selectedCurrency]);
+
+  // Initial Algo Load
   useEffect(() => {
     const loadAlgos = async () => {
-      const list = await getAlgorithms();
-      setAlgos(list);
+      try {
+        const res = await fetch('http://localhost:3001/api/escrow/proxy?url=' + encodeURIComponent('https://hashes.com/en/api/algorithms'));
+        if (res.ok) {
+            const data = await res.json();
+            if (Array.isArray(data)) { setAlgos(data); return; }
+            if (data.success && Array.isArray(data.list)) { setAlgos(data.list); return; }
+        }
+      } catch (e) { console.warn("Could not fetch algos via proxy", e); }
     };
     loadAlgos();
   }, []);
 
+  // Sync Initial Props
   useEffect(() => {
+    if (initialSubmissionData) setSubmissionContent(initialSubmissionData);
     if (initialAlgoId && algos.length > 0) {
       const algo = algos.find(a => a.id.toString() === initialAlgoId);
       if (algo) {
@@ -109,16 +165,13 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
         setAlgoSearch(`ID: ${initialAlgoId}`);
       }
     }
-  }, [initialAlgoId, algos]);
+    setTempAutoSettings(autoUploadSettings);
+  }, [initialSubmissionData, initialAlgoId, algos, autoUploadSettings]);
 
-  useEffect(() => {
-      setTempAutoSettings(autoUploadSettings);
-  }, [autoUploadSettings]);
+  // --- API ACTIONS ---
 
-  // --- BALANCE FEATURE ---
   const fetchBalance = async () => {
       if (!apiKey) return;
-      setLoadingBalance(true);
       try {
           const balanceUrl = `https://hashes.com/en/api/balance?key=${apiKey}`;
           const balanceRes = await fetch(`http://localhost:3001/api/escrow/proxy?url=${encodeURIComponent(balanceUrl)}`);
@@ -143,30 +196,173 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
           }).filter(Boolean) as { currency: string, amount: string, usd: string }[];
 
           setBalances(formatted);
-
+          return convData; 
       } catch (e) {
           console.error("Balance fetch error:", e);
-      } finally {
-          setLoadingBalance(false);
+          return {};
       }
+  };
+
+  const fetchHistory = async (conversionRates: any) => {
+    if (!apiKey) return;
+    try {
+        const uploadsUrl = `https://hashes.com/en/api/uploads?key=${apiKey}`;
+        const res = await fetch(`http://localhost:3001/api/escrow/proxy?url=${encodeURIComponent(uploadsUrl)}`);
+        if (!res.ok) throw new Error("Failed to fetch history");
+        
+        const data = await res.json();
+        if (data.success && Array.isArray(data.list)) {
+            const aggMap = new Map<string, HistoryItem>();
+            
+            data.list.forEach((item: any) => {
+                const dateKey = item.date.split(' ')[0]; 
+                
+                if (!aggMap.has(dateKey)) {
+                    aggMap.set(dateKey, { 
+                        date: dateKey, 
+                        displayDate: dateKey,
+                        usdValue: 0, 
+                        convertedValue: 0,
+                        validHashes: 0, 
+                        raw: { btc: 0, xmr: 0, ltc: 0 } 
+                    });
+                }
+                
+                const entry = aggMap.get(dateKey)!;
+                const btc = parseFloat(item.btc) || 0;
+                const xmr = parseFloat(item.xmr) || 0;
+                const ltc = parseFloat(item.ltc) || 0;
+                const valid = parseInt(item.validHashes) || 0;
+
+                // Crypto -> USD
+                let usd = 0;
+                if (conversionRates.BTC) usd += btc * parseFloat(conversionRates.BTC);
+                if (conversionRates.XMR) usd += xmr * parseFloat(conversionRates.XMR);
+                if (conversionRates.LTC) usd += ltc * parseFloat(conversionRates.LTC);
+
+                entry.usdValue += usd;
+                entry.validHashes += valid;
+                entry.raw.btc += btc;
+                entry.raw.xmr += xmr;
+                entry.raw.ltc += ltc;
+            });
+
+            const sortedHistory = Array.from(aggMap.values()).sort((a, b) => 
+                new Date(a.date).getTime() - new Date(b.date).getTime()
+            );
+
+            setHistory(sortedHistory);
+        }
+    } catch (e) {
+        console.error("History fetch error:", e);
+    }
   };
 
   const fetchJobs = async () => {
     if (!apiKey) return;
     setLoading(true);
     setError(null);
-    fetchBalance(); 
+    
+    // Fetch balance first to get crypto conversion rates, then fetch history
+    const rates = await fetchBalance(); 
+    if (rates) await fetchHistory(rates);
+
     try {
-      const data = await getEscrowJobs(apiKey);
-      setJobs(data);
-      setCurrentPage(1);
+      const jobsUrl = `https://hashes.com/en/api/jobs?key=${apiKey}`;
+      const proxyUrl = `http://localhost:3001/api/escrow/proxy?url=${encodeURIComponent(jobsUrl)}`;
+      const response = await fetch(proxyUrl);
+      if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`Proxy Error: ${response.status} - ${text}`);
+      }
+      
+      const json = await response.json();
+      if (json.success === true && Array.isArray(json.list)) {
+          setJobs(json.list);
+          setCurrentPage(1);
+      } else if (json.message) {
+          throw new Error(json.message);
+      } else {
+          throw new Error("Invalid response format from Hashes.com");
+      }
+
     } catch (e: any) {
-      console.error(e);
+      console.error("Fetch Jobs Error:", e);
       setError(e.message || "Failed to fetch jobs. Check API Key or Network.");
+      setJobs([]); 
     } finally {
       setLoading(false);
     }
   };
+
+  // --- MEMOS & HELPERS ---
+
+  const activeCurrency = useMemo(() => {
+    return CURRENCIES.find(c => c.code === selectedCurrency) || CURRENCIES[0];
+  }, [selectedCurrency]);
+
+  const convertedHistory = useMemo(() => {
+    const rate = exchangeRates[selectedCurrency] || 1;
+    
+    // 1. Convert Values
+    const rawData = history.map(h => ({
+        ...h,
+        convertedValue: h.usdValue * rate
+    }));
+
+    // 2. Intelligent Binning (Aggregation) to prevent "Crammed" graph
+    // If > 60 days, group by Week. If > 180 days, group by Month.
+    if (rawData.length <= 45) return rawData;
+
+    const binnedData: HistoryItem[] = [];
+    let currentBin: HistoryItem | null = null;
+    
+    // Helper to get bin key
+    const getBinKey = (dateStr: string, mode: 'week'|'month') => {
+        const d = new Date(dateStr);
+        if (mode === 'month') return `${d.getFullYear()}-${d.getMonth() + 1}`; // YYYY-M
+        // For week, approximate by getting start of week
+        const day = d.getDay();
+        const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+        const monday = new Date(d.setDate(diff));
+        return monday.toISOString().slice(0, 10);
+    };
+
+    const binMode = rawData.length > 180 ? 'month' : 'week';
+
+    rawData.forEach(item => {
+        const binKey = getBinKey(item.date, binMode);
+        
+        if (!currentBin || getBinKey(currentBin.date, binMode) !== binKey) {
+            if (currentBin) binnedData.push(currentBin);
+            
+            // Format Display Date based on mode
+            let display = item.date;
+            if (binMode === 'month') {
+                const [y, m] = item.date.split('-');
+                const d = new Date(parseInt(y), parseInt(m)-1);
+                display = d.toLocaleDateString(undefined, { month: 'short', year: '2-digit' });
+            } else {
+                const [y, m, d] = item.date.split('-');
+                display = `${m}/${d}`; // Simple MM/DD
+            }
+
+            currentBin = { ...item, displayDate: display };
+        } else {
+            // Aggregate
+            currentBin.usdValue += item.usdValue;
+            currentBin.convertedValue += item.convertedValue;
+            currentBin.validHashes += item.validHashes;
+            currentBin.raw.btc += item.raw.btc;
+            currentBin.raw.xmr += item.raw.xmr;
+            currentBin.raw.ltc += item.raw.ltc;
+            // Keep the bin start date as the data date
+        }
+    });
+    if (currentBin) binnedData.push(currentBin);
+
+    return binnedData;
+  }, [history, selectedCurrency, exchangeRates]);
 
   const handleSort = (key: string) => {
     setSortConfig(current => ({
@@ -175,35 +371,45 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
     }));
   };
 
-  const filteredJobs = jobs.filter(j => {
-    const jobPrice = parseFloat(j.pricePerHashUsd);
-    const filterPriceVal = parseFloat(minPrice);
-    const meetsPrice = !isNaN(filterPriceVal) ? jobPrice >= filterPriceVal : true;
-    
-    const meetsAlgo = filterAlgo 
-      ? (j.algorithmName.toLowerCase().includes(filterAlgo.toLowerCase()) || j.algorithmId.toString() === filterAlgo)
-      : true;
-    return meetsPrice && meetsAlgo;
-  });
+  const filteredJobs = useMemo(() => {
+    return jobs.filter(j => {
+      const jobPrice = parseFloat(j.pricePerHashUsd);
+      const filterPriceVal = parseFloat(minPrice);
+      const meetsPrice = !isNaN(filterPriceVal) ? jobPrice >= filterPriceVal : true;
+      const meetsAlgo = filterAlgo 
+        ? (j.algorithmName.toLowerCase().includes(filterAlgo.toLowerCase()) || j.algorithmId.toString() === filterAlgo)
+        : true;
+      return meetsPrice && meetsAlgo;
+    });
+  }, [jobs, minPrice, filterAlgo]);
 
-  const sortedJobs = [...filteredJobs].sort((a, b) => {
-    const { key, direction } = sortConfig;
-    let comparison = 0;
+  // FIX: This memo was missing, causing TS2552 errors in the JSX
+  const filteredAlgos = useMemo(() => {
+    if (!algoSearch) return algos;
+    return algos.filter(a =>
+        a.algorithmName.toLowerCase().includes(algoSearch.toLowerCase()) ||
+        a.id.toString().includes(algoSearch)
+    );
+  }, [algos, algoSearch]);
 
-    if (key === 'pricePerHashUsd') {
-      comparison = parseFloat(a.pricePerHashUsd) - parseFloat(b.pricePerHashUsd);
-    } else if (key === 'leftHashes') {
-      comparison = a.leftHashes - b.leftHashes;
-    } else if (key === 'createdAt') {
-       comparison = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-    } else if (key === 'maxCracksNeeded') {
-       const valA = (a as any).maxCracksNeeded || 0;
-       const valB = (b as any).maxCracksNeeded || 0;
-       comparison = valA - valB;
-    }
-
-    return direction === 'asc' ? comparison : -comparison;
-  });
+  const sortedJobs = useMemo(() => {
+    return [...filteredJobs].sort((a, b) => {
+      const { key, direction } = sortConfig;
+      let comparison = 0;
+      if (key === 'pricePerHashUsd') {
+        comparison = parseFloat(a.pricePerHashUsd) - parseFloat(b.pricePerHashUsd);
+      } else if (key === 'leftHashes') {
+        comparison = a.leftHashes - b.leftHashes;
+      } else if (key === 'createdAt') {
+         comparison = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      } else if (key === 'maxCracksNeeded') {
+         const valA = (a as any).maxCracksNeeded || 0;
+         const valB = (b as any).maxCracksNeeded || 0;
+         comparison = valA - valB;
+      }
+      return direction === 'asc' ? comparison : -comparison;
+    });
+  }, [filteredJobs, sortConfig]);
 
   const totalPages = Math.ceil(sortedJobs.length / itemsPerPage);
   const paginatedJobs = sortedJobs.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
@@ -216,164 +422,121 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
     }).length;
   };
 
-  const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  // --- CHART RENDERING (SMART BAR CHART) ---
+  const renderChart = () => {
+      if (convertedHistory.length === 0) return (
+          <div className="h-64 flex flex-col items-center justify-center text-slate-500 border border-dashed border-slate-700 rounded-lg bg-slate-950/30">
+             <BarChart3 className="mb-2 opacity-50" size={32} />
+             <span>No history data available.</span>
+          </div>
+      );
 
-  const fetchViaProxy = async (fileUrl: string, jobId: number, attempt = 1): Promise<string | null> => {
-      const maxAttempts = 3;
-      try {
-          const proxyUrl = `http://localhost:3001/api/escrow/proxy?url=${encodeURIComponent(fileUrl)}`;
-          const response = await fetch(proxyUrl);
-          
-          if (!response.ok) throw new Error(`HTTP_${response.status}`);
-
-          const text = await response.text();
-          if (text.trim().toLowerCase().startsWith('<!doctype') || text.includes('<html')) {
-             throw new Error("INVALID_CONTENT_HTML");
-          }
-          return text;
-      } catch (err: any) {
-          if (attempt < maxAttempts) {
-              let waitTime = 2000 * attempt; 
-              console.warn(`Job #${jobId} failed (Attempt ${attempt}). Retrying in ${waitTime}ms... Error: ${err.message}`);
-              await delay(waitTime);
-              return fetchViaProxy(fileUrl, jobId, attempt + 1);
-          }
-          throw err;
-      }
-  };
-
-  const startMassDownload = async () => {
-    const targetJobs = jobs.filter(j => {
-        const meetsAlgo = dlAlgo ? j.algorithmId.toString() === dlAlgo : true;
-        const meetsPrice = dlMinPrice ? parseFloat(j.pricePerHashUsd) >= parseFloat(dlMinPrice) : true;
-        return meetsAlgo && meetsPrice && j.leftList;
-    });
-
-    if (targetJobs.length === 0) { alert("No jobs match your criteria."); return; }
-    
-    setDownloading(true);
-    setDownloadProgress({ current: 0, total: targetJobs.length, found: 0 });
-    setDownloadLogs([]); 
-    
-    let combinedContent = '';
-    
-    try {
-      for (let i = 0; i < targetJobs.length; i++) {
-        const job = targetJobs[i];
-        setDownloadProgress(prev => ({ ...prev!, current: i + 1 }));
-        
-        let fileUrl = job.leftList;
-        if (!fileUrl.startsWith('http')) {
-             if (!fileUrl.startsWith('/')) fileUrl = '/' + fileUrl;
-             fileUrl = `https://hashes.com${fileUrl}`;
-        }
-
-        setDownloadLogs(prev => [...prev, `Job #${job.id}: Fetching...`]);
-
-        try {
-          await delay(500); 
-          const text = await fetchViaProxy(fileUrl, job.id);
-          if (text && text.trim()) {
-            combinedContent += text.trim() + '\n';
-            setDownloadProgress(prev => ({ ...prev!, found: prev!.found + 1 }));
-            setDownloadLogs(prev => { const newLogs = [...prev]; newLogs[newLogs.length - 1] = `✅ Job #${job.id}: Success.`; return newLogs; });
-          } else {
-            setDownloadLogs(prev => { const newLogs = [...prev]; newLogs[newLogs.length - 1] = `⚠️ Job #${job.id}: File empty.`; return newLogs; });
-          }
-        } catch (err: any) {
-          setDownloadLogs(prev => { const newLogs = [...prev]; newLogs[newLogs.length - 1] = `❌ Job #${job.id}: Failed (${err.message}).`; return newLogs; });
-        }
-      }
-
-      if (!combinedContent.trim()) {
-        setDownloadLogs(prev => [...prev, `❌ Process complete. No hashes found.`]);
-        return;
-      }
-
-      const algoObj = algos.find(a => a.id.toString() === dlAlgo);
-      const algoName = algoObj ? algoObj.algorithmName.replace(/[^a-z0-9]/gi, '_') : 'Mixed_Algorithms';
-      const dateStr = new Date().toISOString().slice(0,10);
-      const filename = `${algoName}_${dateStr}.txt`;
-
-      const blob = new Blob([combinedContent], { type: 'text/plain' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      const height = 240;
+      const width = 800; // SVG coordinate space
+      const padding = { top: 20, right: 20, bottom: 40, left: 50 };
       
-      setDownloadLogs(prev => [...prev, `🎉 DONE: Saved as ${filename}`]);
+      const chartWidth = width - padding.left - padding.right;
+      const chartHeight = height - padding.top - padding.bottom;
 
-    } catch (e: any) {
-      console.error("Mass download error:", e);
-      alert(`Mass download failed: ${e.message}`);
-    } finally {
-      setDownloading(false);
-    }
-  };
-
-  const handleSubmit = async () => {
-    if((!submissionContent && !submissionFile) || !submissionAlgo || !apiKey) return;
-    
-    setSubmitting(true);
-    try {
-      const formData = new FormData();
-      formData.append('key', apiKey);
-      formData.append('algo', submissionAlgo);
+      const maxVal = Math.max(...convertedHistory.map(h => h.convertedValue), 1);
       
-      if (submissionFile) {
-          formData.append('userfile', submissionFile);
-      } else {
-          const blob = new Blob([submissionContent], { type: 'text/plain' });
-          formData.append('userfile', blob, 'founds.txt');
-      }
+      // Calculate Bar Layout
+      const barWidth = Math.max(Math.min((chartWidth / convertedHistory.length) * 0.7, 40), 4);
+      const gap = (chartWidth - (barWidth * convertedHistory.length)) / (convertedHistory.length + 1);
 
-      const response = await fetch('http://localhost:3001/api/escrow/proxy', {
-          method: 'POST',
-          body: formData, 
-      });
+      return (
+        <div className="relative w-full h-64 select-none">
+            <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full overflow-visible">
+                {/* Y Axis Grid */}
+                {[0, 0.25, 0.5, 0.75, 1].map(tick => {
+                    const y = height - padding.bottom - tick * chartHeight;
+                    return (
+                        <g key={tick}>
+                            <line x1={padding.left} y1={y} x2={width - padding.right} y2={y} stroke="#334155" strokeWidth="1" strokeDasharray="4 4" />
+                            <text x={padding.left - 10} y={y + 4} textAnchor="end" className="text-[10px] fill-slate-500 font-mono">
+                                {activeCurrency.symbol}{(tick * maxVal).toFixed(2)}
+                            </text>
+                        </g>
+                    );
+                })}
 
-      if (!response.ok) {
-          const text = await response.text();
-          throw new Error(`Upload failed: ${text}`);
-      }
+                {/* Bars */}
+                {convertedHistory.map((h, i) => {
+                    const barHeight = (h.convertedValue / maxVal) * chartHeight;
+                    const x = padding.left + gap + i * (barWidth + gap);
+                    const y = height - padding.bottom - barHeight;
 
-      const res = await response.json();
-      
-      if (res.success === true) {
-          alert(`Submission Successful!\nHashes.com Response: Success`);
-          setSubmissionContent('');
-          setSubmissionFile(null);
-      } else {
-           throw new Error(res.message || "Unknown error from Hashes.com");
-      }
+                    const isHovered = hoveredChartPoint?.date === h.date;
 
-    } catch (e: any) {
-      alert(`Error submitting: ${e.message}`);
-    } finally {
-      setSubmitting(false);
-    }
+                    return (
+                        <g key={i}>
+                            <rect 
+                                x={x} 
+                                y={y} 
+                                width={barWidth} 
+                                height={barHeight} 
+                                className={`transition-all duration-200 cursor-pointer ${isHovered ? 'fill-emerald-400' : 'fill-emerald-600/80 hover:fill-emerald-500'}`}
+                                onMouseEnter={() => setHoveredChartPoint(h)}
+                                onMouseLeave={() => setHoveredChartPoint(null)}
+                            />
+                            {/* Invisible hit rect for easier hovering on small bars */}
+                            <rect 
+                                x={x - gap/2}
+                                y={padding.top}
+                                width={barWidth + gap}
+                                height={chartHeight}
+                                fill="transparent"
+                                onMouseEnter={() => setHoveredChartPoint(h)}
+                                onMouseLeave={() => setHoveredChartPoint(null)}
+                            />
+                        </g>
+                    );
+                })}
+
+                {/* X Axis Labels (Skip based on density) */}
+                {convertedHistory.map((h, i) => {
+                    // Show roughly 6-8 labels max
+                    const step = Math.ceil(convertedHistory.length / 8);
+                    if (i % step !== 0) return null;
+
+                    const x = padding.left + gap + i * (barWidth + gap) + barWidth / 2;
+                    return (
+                        <text key={i} x={x} y={height - 10} textAnchor="middle" className="text-[10px] fill-slate-500 font-mono">
+                            {h.displayDate}
+                        </text>
+                    );
+                })}
+            </svg>
+
+            {/* Hover Tooltip */}
+            {hoveredChartPoint && (
+                <div 
+                    className="absolute z-10 pointer-events-none bg-slate-900 border border-slate-700 p-3 rounded shadow-xl text-xs"
+                    style={{ 
+                        left: '50%', 
+                        top: '10%',
+                        transform: 'translateX(-50%)' 
+                    }}
+                >
+                    <div className="font-bold text-slate-200 mb-1 border-b border-slate-700 pb-1 text-center">
+                        {hoveredChartPoint.displayDate} ({hoveredChartPoint.date})
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                        <span className="text-slate-400">Earnings:</span>
+                        <span className="text-emerald-400 font-mono font-bold">
+                            {activeCurrency.symbol}{hoveredChartPoint.convertedValue.toFixed(3)}
+                        </span>
+                        
+                        <span className="text-slate-400">Valid Hashes:</span>
+                        <span className="text-slate-200 font-mono">{hoveredChartPoint.validHashes}</span>
+                    </div>
+                </div>
+            )}
+        </div>
+      );
   };
 
-  const filteredAlgos = algos.filter(a => 
-    a.algorithmName.toLowerCase().includes(algoSearch.toLowerCase()) || 
-    a.id.toString().includes(algoSearch)
-  );
-
-  const selectAlgo = (id: number, name: string) => {
-    setSubmissionAlgo(id.toString());
-    setAlgoSearch(name);
-    setShowAlgoList(false);
-  };
-
-  const saveAutoSettings = () => {
-      onUpdateAutoUploadSettings(tempAutoSettings);
-      setShowAutoSettings(false);
-  };
-
+  // --- RENDER MAIN UI ---
   return (
     <div className="space-y-6 pb-10 relative">
       {/* Header & Controls */}
@@ -413,6 +576,23 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
         </div>
         
         <div className="flex gap-3 flex-wrap items-end">
+           {/* Currency Selector */}
+           <div>
+               <label className="text-xs text-slate-500 uppercase font-bold">Currency</label>
+               <div className="relative mt-1">
+                   <Globe size={14} className="absolute left-2.5 top-2.5 text-slate-500"/>
+                   <select 
+                       value={selectedCurrency}
+                       onChange={(e) => setSelectedCurrency(e.target.value)}
+                       className="bg-slate-950 border border-slate-700 rounded pl-8 pr-3 py-2 text-sm text-white outline-none focus:border-indigo-500 cursor-pointer appearance-none min-w-[120px]"
+                   >
+                       {CURRENCIES.map(c => (
+                           <option key={c.code} value={c.code}>{c.code} ({c.symbol})</option>
+                       ))}
+                   </select>
+               </div>
+           </div>
+
            {/* Auto Upload Settings Toggle */}
            <button
              onClick={() => setShowAutoSettings(true)}
@@ -423,7 +603,7 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
              }`}
            >
               <Zap size={16} className={autoUploadSettings.enabled ? "fill-current" : ""} />
-              {autoUploadSettings.enabled ? 'Auto-Upload ON' : 'Auto-Upload OFF'}
+              {autoUploadSettings.enabled ? 'Auto-Upload' : 'Auto-Upload'}
            </button>
 
            {/* View Filters */}
@@ -468,6 +648,46 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
            </button>
         </div>
       </div>
+
+      {/* --- EARNINGS ANALYTICS CARD --- */}
+      {convertedHistory.length > 0 && (
+          <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg animate-in fade-in slide-in-from-bottom-4 duration-500">
+              <div 
+                  className="bg-slate-950/50 p-4 border-b border-slate-800 flex items-center justify-between cursor-pointer hover:bg-slate-800/50 transition-colors"
+                  onClick={() => setShowAnalytics(!showAnalytics)}
+              >
+                 <div className="flex items-center gap-2">
+                     <TrendingUp size={18} className="text-emerald-400" />
+                     <h3 className="text-sm font-bold text-slate-200">Earnings Analytics</h3>
+                     <span className="text-xs bg-slate-800 text-slate-400 px-2 py-0.5 rounded-full border border-slate-700 font-mono">
+                        Total: {activeCurrency.symbol}{convertedHistory.reduce((a, b) => a + b.convertedValue, 0).toFixed(2)} {activeCurrency.code}
+                     </span>
+                 </div>
+                 {showAnalytics ? <ChevronUp size={18} className="text-slate-500"/> : <ChevronDown size={18} className="text-slate-500"/>}
+              </div>
+              
+              {showAnalytics && (
+                  <div className="p-6">
+                      <div className="mb-4 flex justify-between items-end">
+                         <div>
+                             <p className="text-xs text-slate-400 mb-1">
+                                 {convertedHistory.length > 45 ? 'Aggregated Earnings (Weekly/Monthly)' : 'Daily Earnings'}
+                             </p>
+                             <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+                                {activeCurrency.symbol}{convertedHistory.reduce((a, b) => a + b.convertedValue, 0).toFixed(2)}
+                                <span className="text-sm font-normal text-slate-500">{activeCurrency.code} Lifetime</span>
+                             </h2>
+                         </div>
+                         <div className="text-right text-xs text-slate-500">
+                             <p>Records: {history.length}</p>
+                             <p>Range: {history[0]?.date} - {history[history.length - 1]?.date}</p>
+                         </div>
+                      </div>
+                      {renderChart()}
+                  </div>
+              )}
+          </div>
+      )}
 
       {/* Error Banner */}
       {error && (
@@ -527,7 +747,10 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
                     </div>
 
                     <button 
-                        onClick={saveAutoSettings}
+                        onClick={() => {
+                            onUpdateAutoUploadSettings(tempAutoSettings);
+                            setShowAutoSettings(false);
+                        }}
                         className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 transition-all"
                     >
                         <Save size={18} />
@@ -716,7 +939,11 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
                         filteredAlgos.map(a => (
                           <div 
                             key={a.id}
-                            onClick={() => selectAlgo(a.id, a.algorithmName)}
+                            onClick={() => (function(id, name) {
+                                setSubmissionAlgo(id.toString());
+                                setAlgoSearch(name);
+                                setShowAlgoList(false);
+                            })(a.id, a.algorithmName)}
                             className="px-3 py-2 hover:bg-indigo-600 hover:text-white cursor-pointer text-sm flex justify-between group"
                           >
                             <span>{a.algorithmName}</span>
@@ -736,7 +963,45 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
                 </div>
 
                 <button 
-                    onClick={handleSubmit}
+                    onClick={async () => {
+                        if((!submissionContent && !submissionFile) || !submissionAlgo || !apiKey) return;
+                        setSubmitting(true);
+                        try {
+                          const formData = new FormData();
+                          formData.append('key', apiKey);
+                          formData.append('algo', submissionAlgo);
+                          
+                          if (submissionFile) {
+                              formData.append('userfile', submissionFile);
+                          } else {
+                              const blob = new Blob([submissionContent], { type: 'text/plain' });
+                              formData.append('userfile', blob, 'founds.txt');
+                          }
+
+                          const response = await fetch('http://localhost:3001/api/escrow/proxy', {
+                              method: 'POST',
+                              body: formData, 
+                          });
+
+                          if (!response.ok) {
+                              const text = await response.text();
+                              throw new Error(`Upload failed: ${text}`);
+                          }
+
+                          const res = await response.json();
+                          if (res.success === true) {
+                              alert(`Submission Successful!\nHashes.com Response: Success`);
+                              setSubmissionContent('');
+                              setSubmissionFile(null);
+                          } else {
+                               throw new Error(res.message || "Unknown error from Hashes.com");
+                          }
+                        } catch (e: any) {
+                          alert(`Error submitting: ${e.message}`);
+                        } finally {
+                          setSubmitting(false);
+                        }
+                    }}
                     disabled={submitting || (!submissionContent && !submissionFile) || !submissionAlgo}
                     className="w-full bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-3 rounded-lg font-medium flex justify-center items-center gap-2 disabled:opacity-50 shadow-lg shadow-emerald-900/20 transition-all"
                 >
@@ -874,7 +1139,98 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
                     )}
 
                     <button 
-                        onClick={startMassDownload}
+                        onClick={async () => {
+                            const targetJobs = jobs.filter(j => {
+                                const meetsAlgo = dlAlgo ? j.algorithmId.toString() === dlAlgo : true;
+                                const meetsPrice = dlMinPrice ? parseFloat(j.pricePerHashUsd) >= parseFloat(dlMinPrice) : true;
+                                return meetsAlgo && meetsPrice && j.leftList;
+                            });
+
+                            if (targetJobs.length === 0) { alert("No jobs match your criteria."); return; }
+                            
+                            setDownloading(true);
+                            setDownloadProgress({ current: 0, total: targetJobs.length, found: 0 });
+                            setDownloadLogs([]); 
+                            
+                            let combinedContent = '';
+                            
+                            try {
+                              const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+                              // Proxy helper
+                              const fetchViaProxy = async (fileUrl: string, jobId: number, attempt = 1): Promise<string | null> => {
+                                  try {
+                                      let cleanUrl = fileUrl;
+                                      if (cleanUrl.startsWith('http:')) cleanUrl = cleanUrl.replace('http:', 'https:');
+                                      else if (!cleanUrl.startsWith('http')) {
+                                          if (!cleanUrl.startsWith('/')) cleanUrl = '/' + cleanUrl;
+                                          cleanUrl = `https://hashes.com${cleanUrl}`;
+                                      }
+                                      const proxyUrl = `http://localhost:3001/api/escrow/proxy?url=${encodeURIComponent(cleanUrl)}`;
+                                      const response = await fetch(proxyUrl);
+                                      if (!response.ok) throw new Error(`HTTP_${response.status}`);
+                                      const text = await response.text();
+                                      if (text.trim().toLowerCase().startsWith('<!doctype') || text.includes('<html')) {
+                                         throw new Error("INVALID_CONTENT_HTML");
+                                      }
+                                      return text;
+                                  } catch (err: any) {
+                                      if (attempt < 3) {
+                                          await delay(10 * attempt);
+                                          return fetchViaProxy(fileUrl, jobId, attempt + 1);
+                                      }
+                                      throw err;
+                                  }
+                              };
+
+                              for (let i = 0; i < targetJobs.length; i++) {
+                                const job = targetJobs[i];
+                                setDownloadProgress(prev => ({ ...prev!, current: i + 1 }));
+                                setDownloadLogs(prev => [...prev, `Job #${job.id}: Fetching...`]);
+
+                                try {
+                                  await delay(10); 
+                                  const text = await fetchViaProxy(job.leftList, job.id);
+                                  if (text && text.trim()) {
+                                    combinedContent += text.trim() + '\n';
+                                    setDownloadProgress(prev => ({ ...prev!, found: prev!.found + 1 }));
+                                    setDownloadLogs(prev => { const newLogs = [...prev]; newLogs[newLogs.length - 1] = `✅ Job #${job.id}: Success.`; return newLogs; });
+                                  } else {
+                                    setDownloadLogs(prev => { const newLogs = [...prev]; newLogs[newLogs.length - 1] = `⚠️ Job #${job.id}: File empty.`; return newLogs; });
+                                  }
+                                } catch (err: any) {
+                                  setDownloadLogs(prev => { const newLogs = [...prev]; newLogs[newLogs.length - 1] = `❌ Job #${job.id}: Failed (${err.message}).`; return newLogs; });
+                                }
+                              }
+
+                              if (!combinedContent.trim()) {
+                                setDownloadLogs(prev => [...prev, `❌ Process complete. No hashes found.`]);
+                                return;
+                              }
+
+                              const algoObj = algos.find(a => a.id.toString() === dlAlgo);
+                              const algoName = algoObj ? algoObj.algorithmName.replace(/[^a-z0-9]/gi, '_') : 'Mixed_Algorithms';
+                              const dateStr = new Date().toISOString().slice(0,10);
+                              const filename = `${algoName}_${dateStr}.txt`;
+
+                              const blob = new Blob([combinedContent], { type: 'text/plain' });
+                              const url = URL.createObjectURL(blob);
+                              const a = document.createElement('a');
+                              a.href = url;
+                              a.download = filename;
+                              document.body.appendChild(a);
+                              a.click();
+                              document.body.removeChild(a);
+                              URL.revokeObjectURL(url);
+                              
+                              setDownloadLogs(prev => [...prev, `🎉 DONE: Saved as ${filename}`]);
+
+                            } catch (e: any) {
+                              console.error("Mass download error:", e);
+                              alert(`Mass download failed: ${e.message}`);
+                            } finally {
+                              setDownloading(false);
+                            }
+                        }}
                         disabled={downloading || calculateDownloadableCount() === 0 || !dlAlgo}
                         className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-bold py-3 rounded transition-all flex justify-center items-center gap-2"
                     >

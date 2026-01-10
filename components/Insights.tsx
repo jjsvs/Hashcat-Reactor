@@ -13,7 +13,8 @@ import {
   BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, 
   Tooltip, ResponsiveContainer, LabelList, ScatterChart, 
   Scatter, ZAxis, AreaChart, Area, Radar, RadarChart, 
-  PolarGrid, PolarAngleAxis, PolarRadiusAxis, Legend
+  PolarGrid, PolarAngleAxis, PolarRadiusAxis, Legend,
+  ComposedChart, Line
 } from 'recharts';
 import { SessionStats, LogEntry, HashcatConfig, RecoveredHash } from '../types';
 import { HASH_TYPES } from '../constants';
@@ -531,20 +532,39 @@ const Insights: React.FC<InsightsProps> = ({
         });
     }, [localPastSessions]);
 
-    // 2. Cumulative Growth Data (Area Chart)
+    // 2. Cumulative Growth Data (Area Charts for Recovered, Cost, Power)
     const cumulativeGrowthData = useMemo(() => {
         if (!localPastSessions || localPastSessions.length === 0) return [];
+        
         const sorted = [...localPastSessions].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-        let runningTotal = 0;
+        
+        let runningRecovered = 0;
+        let runningEnergy = 0; // Wh
+        let runningCost = 0;
+
         return sorted.map(s => {
-            runningTotal += s.recovered;
+            runningRecovered += s.recovered;
+            
+            // Energy Calculation (Wh)
+            // powerUsage is Avg Watts, duration is Seconds
+            const hours = s.duration / 3600;
+            const wh = s.powerUsage * hours;
+            runningEnergy += wh;
+
+            // Cost Calculation
+            const kwh = wh / 1000;
+            const cost = kwh * electricityRate;
+            runningCost += cost;
+
             return {
                 date: new Date(s.date).toLocaleDateString(),
-                total: runningTotal,
-                sessionValue: s.recovered
+                recovered: runningRecovered,
+                energy: parseFloat(runningEnergy.toFixed(2)),
+                cost: parseFloat(runningCost.toFixed(2)),
+                sessionRecovered: s.recovered
             };
         });
-    }, [localPastSessions]);
+    }, [localPastSessions, electricityRate]);
 
     // --- PRINCE Risk Calculation ---
     const princeRisk = useMemo(() => {
@@ -994,6 +1014,47 @@ const Insights: React.FC<InsightsProps> = ({
     const getCurrencySymbol = (currCode: string) => {
         const found = CURRENCIES.find(c => c.code === currCode);
         return found ? found.symbol : '$';
+    };
+
+    const CustomHistoryTooltip = ({ active, payload, label }: any) => {
+        if (active && payload && payload.length) {
+            const sym = getCurrencySymbol(currency);
+            return (
+                <div className="bg-slate-900 border border-slate-700 p-3 rounded-lg shadow-xl text-xs z-50">
+                    <div className="font-bold text-slate-300 mb-2 border-b border-slate-800 pb-1">{label}</div>
+                    {payload.map((entry: any, index: number) => {
+                        if (entry.dataKey === 'recovered') {
+                             return (
+                                <div key={index} className="flex items-center gap-2 mb-1">
+                                    <div className="w-2 h-2 rounded-full bg-emerald-500"></div>
+                                    <span className="text-slate-400">Recovered:</span>
+                                    <span className="text-white font-mono font-bold">{entry.value}</span>
+                                </div>
+                             );
+                        }
+                        if (entry.dataKey === 'cost') {
+                             return (
+                                <div key={index} className="flex items-center gap-2 mb-1">
+                                    <div className="w-2 h-2 rounded-full bg-cyan-500"></div>
+                                    <span className="text-slate-400">Cumul. Cost:</span>
+                                    <span className="text-white font-mono font-bold">{sym}{entry.value}</span>
+                                </div>
+                             );
+                        }
+                        return null;
+                    })}
+                    {/* Explicitly show Energy from payload if available */}
+                    {payload[0] && payload[0].payload.energy && (
+                        <div className="flex items-center gap-2 mb-1">
+                             <div className="w-2 h-2 rounded-full bg-amber-500"></div>
+                             <span className="text-slate-400">Energy:</span>
+                             <span className="text-white font-mono font-bold">{payload[0].payload.energy} Wh</span>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+        return null;
     };
 
     // --- Export Report ---
@@ -1620,24 +1681,87 @@ const Insights: React.FC<InsightsProps> = ({
                                 <span className="text-xs text-slate-500 bg-slate-900 px-2 py-1 rounded border border-slate-800">{t('insights_history_total', { count: (localPastSessions || []).length })}</span>
                             </div>
 
-                            {/* CUMULATIVE GROWTH (AREA CHART) */}
+                            {/* CUMULATIVE GROWTH (COMBINED: RECOVERED + COST) */}
                             {localPastSessions && localPastSessions.length > 2 && (
-                                <div className="h-48 w-full border-b border-slate-800 bg-slate-950/20 p-2">
-                                     <ResponsiveContainer width="100%" height="100%">
-                                        <AreaChart data={cumulativeGrowthData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
+                                <div className="h-64 w-full border-b border-slate-800 bg-slate-950/20 p-4">
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <ComposedChart data={cumulativeGrowthData} margin={{ top: 10, right: 30, left: 10, bottom: 0 }}>
                                             <defs>
-                                                <linearGradient id="colorTotal" x1="0" y1="0" x2="0" y2="1">
-                                                    <stop offset="5%" stopColor="#10b981" stopOpacity={0.3}/>
+                                                <linearGradient id="colorRecovered" x1="0" y1="0" x2="0" y2="1">
+                                                    <stop offset="5%" stopColor="#10b981" stopOpacity={0.2}/>
                                                     <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
                                                 </linearGradient>
+                                                <linearGradient id="colorCost" x1="0" y1="0" x2="0" y2="1">
+                                                    <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.2}/>
+                                                    <stop offset="95%" stopColor="#06b6d4" stopOpacity={0}/>
+                                                </linearGradient>
                                             </defs>
+                                            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
                                             <XAxis dataKey="date" hide />
-                                            <YAxis hide />
-                                            <Tooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#1e293b' }} itemStyle={{ color: '#e2e8f0', fontSize: '12px' }} />
-                                            <Area type="monotone" dataKey="total" stroke="#10b981" fillOpacity={1} fill="url(#colorTotal)" strokeWidth={2} />
-                                        </AreaChart>
+                                            
+                                            {/* Left Axis: Recovered */}
+                                            <YAxis 
+                                                yAxisId="recovered" 
+                                                orientation="left" 
+                                                stroke="#10b981" 
+                                                tick={{ fill: '#059669', fontSize: 10 }}
+                                                tickLine={false}
+                                                axisLine={false}
+                                                label={{ value: 'Recovered', angle: -90, position: 'insideLeft', fill: '#059669', fontSize: 10 }}
+                                            />
+                                            
+                                            {/* Right Axis: Cost */}
+                                            <YAxis 
+                                                yAxisId="cost" 
+                                                orientation="right" 
+                                                stroke="#06b6d4" 
+                                                tick={{ fill: '#0891b2', fontSize: 10 }}
+                                                tickLine={false}
+                                                axisLine={false}
+                                                label={{ value: `Cost (${getCurrencySymbol(currency)})`, angle: 90, position: 'insideRight', fill: '#0891b2', fontSize: 10 }}
+                                                tickFormatter={(val) => `${getCurrencySymbol(currency)}${val}`}
+                                            />
+                                            
+                                            {/* Hidden Axis: Energy (for scaling) */}
+                                            <YAxis 
+                                                yAxisId="energy" 
+                                                orientation="right" 
+                                                hide
+                                                domain={['auto', 'auto']}
+                                            />
+
+                                            <Tooltip content={<CustomHistoryTooltip />} cursor={{ stroke: '#475569', strokeWidth: 1 }} />
+                                            
+                                            <Area 
+                                                yAxisId="recovered"
+                                                type="monotone" 
+                                                dataKey="recovered" 
+                                                stroke="#10b981" 
+                                                fill="url(#colorRecovered)" 
+                                                strokeWidth={2} 
+                                                name="Total Recovered" 
+                                            />
+                                            <Line 
+                                                yAxisId="cost"
+                                                type="monotone" 
+                                                dataKey="cost" 
+                                                stroke="#06b6d4" 
+                                                strokeWidth={2} 
+                                                dot={false}
+                                                name="Total Cost" 
+                                            />
+                                            <Line 
+                                                yAxisId="energy"
+                                                type="monotone" 
+                                                dataKey="energy" 
+                                                stroke="#f59e0b" 
+                                                strokeWidth={2} 
+                                                strokeDasharray="4 4"
+                                                dot={false}
+                                                name="Total Energy" 
+                                            />
+                                        </ComposedChart>
                                     </ResponsiveContainer>
-                                    <div className="text-center text-[10px] text-emerald-500/50 uppercase font-bold -mt-4 relative z-10">Cumulative Recovered Growth</div>
                                 </div>
                             )}
                             

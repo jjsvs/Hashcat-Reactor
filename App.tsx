@@ -24,7 +24,7 @@ import PowerGraph from './components/PowerGraph';
 import RemoteAccess from './components/RemoteAccess';
 import File2John from './components/File2John';
 import SessionControls from './components/SessionControls'; 
-import { getAlgorithms } from './services/geminiService';
+
 
 const uuid = () => Math.random().toString(36).substring(2, 9);
 
@@ -288,11 +288,23 @@ function App() {
       localStorage.setItem('reactor_auto_upload', JSON.stringify(autoUploadSettings));
   }, [autoUploadSettings]);
 
+  // --- Fetch Algorithms (REPLACED geminiService) ---
   useEffect(() => {
     const fetchAlgos = async () => {
         try {
-            const list = await getAlgorithms();
-            setEscrowAlgorithms(list);
+            // Direct fetch via proxy instead of using geminiService
+            const proxyUrl = getSocketUrl() + '/api/escrow/proxy?url=' + encodeURIComponent('https://hashes.com/en/api/algorithms');
+            const response = await fetch(proxyUrl);
+            const data = await response.json();
+            
+            // Handle potentially different response structures
+            if (Array.isArray(data)) {
+                setEscrowAlgorithms(data);
+            } else if (data.list && Array.isArray(data.list)) {
+                setEscrowAlgorithms(data.list);
+            } else if (data.success && Array.isArray(data.list)) {
+                setEscrowAlgorithms(data.list);
+            }
         } catch (e) {
             console.error("Failed to load escrow algorithms", e);
         }
@@ -377,7 +389,7 @@ function App() {
 
   const newHashesCount = useMemo(() => currentDisplayedCracks.filter(h => !h.sentToEscrow).length, [currentDisplayedCracks]);
 
-  // --- INTELLIGENT MULTI-SESSION AUTO UPLOAD ---
+  // --- INTELLIGENT MULTI-SESSION AUTO UPLOAD (Fixed & Dependency Free) ---
   useEffect(() => {
     const checkAndUploadAll = async () => {
         if (!apiKey || !autoUploadSettings.enabled || escrowAlgorithms.length === 0) return;
@@ -390,9 +402,11 @@ function App() {
             const sess = sessions[sessId];
             const unsentHashes = sess.recoveredHashes.filter(h => !h.sentToEscrow);
             
+            // Check threshold logic
             if (unsentHashes.length >= autoUploadSettings.threshold) {
                 uploadingSessionIds.current.add(sessId);
                 
+                // Algo Detection Logic
                 let targetAlgoId = '';
                 const hashTypeObj = HASH_TYPES.find(ht => ht.id === sess.hashType);
                 if (hashTypeObj) {
@@ -402,6 +416,7 @@ function App() {
                      if (matchedAlgo) targetAlgoId = matchedAlgo.id.toString();
                 }
                 
+                // Fallback Detection
                 if (!targetAlgoId && !isNaN(Number(sess.hashType))) {
                      if (escrowAlgorithms.some(ea => ea.id.toString() === sess.hashType)) {
                          targetAlgoId = sess.hashType;
@@ -417,15 +432,19 @@ function App() {
                 addLog(sessId, `[AUTO-UPLOAD] Uploading ${unsentHashes.length} hashes to Algo ID ${targetAlgoId}...`, 'INFO');
 
                 try {
+                    // --- THE WORKING LOGIC USING FORM DATA ---
                     const content = unsentHashes.map(h => `${h.hash}:${h.plain}`).join('\n');
                     const blob = new Blob([content], { type: 'text/plain' });
                     
                     const formData = new FormData();
                     formData.append('key', apiKey);
                     formData.append('algo', targetAlgoId);
+                    // Crucial: Appending as a file/blob allows browser to set correct multipart headers
                     formData.append('userfile', blob, 'auto_founds.txt');
 
                     const apiUrl = getSocketUrl() + '/api/escrow/proxy';
+                    
+                    // Note: No 'Content-Type' header needed; browser adds it with boundary automatically
                     const response = await fetch(apiUrl, { method: 'POST', body: formData });
                     const res = await response.json();
 
@@ -958,7 +977,7 @@ function App() {
           <div className="flex items-center gap-3">
              {jobQueue.length > 0 && (<div className="flex items-center gap-2 px-3 py-1 bg-slate-900 border border-slate-800 rounded-lg text-xs font-bold text-slate-400"><List size={14} /><span>{t('Queue pending', { count: jobQueue.length })}</span>{isQueueProcessing && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>}</div>)}
             
-            {/* Added Session Controls Here with Optimistic Update */}
+            {/* Session Controls */}
             <SessionControls 
                 sessionId={activeSessionId} 
                 status={status} 
