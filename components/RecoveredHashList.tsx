@@ -1,4 +1,5 @@
 import React, { useRef } from 'react'; 
+import { Virtuoso } from 'react-virtuoso';
 import { RecoveredHash } from '../types';
 import { ShieldCheck, Copy, Globe, CheckCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -64,7 +65,7 @@ const RecoveredHashList: React.FC<Props> = ({ hashes, onSendToEscrow }) => {
       
       <div 
         ref={scrollRef}
-        className="flex-1 overflow-y-auto p-0 scroll-smooth"
+        className="flex-1 overflow-hidden p-0"
       >
         {hashes.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-slate-600 gap-2 opacity-50">
@@ -72,42 +73,43 @@ const RecoveredHashList: React.FC<Props> = ({ hashes, onSendToEscrow }) => {
                 <span className="text-xs">{t('rec_empty')}</span>
             </div>
         ) : (
-            <div className="divide-y divide-slate-800/50">
-                {hashes.map((item) => {
-                    const readablePlain = decodePlain(item.plain);
-                    return (
-                        <div 
-                          key={item.id} 
-                          className={`p-3 transition-colors flex items-center justify-between group ${
-                            item.sentToEscrow ? 'bg-slate-900/30 hover:bg-slate-900/50' : 'hover:bg-slate-900/50'
-                          }`}
-                        >
-                            <div className="flex items-center gap-3 overflow-hidden">
-                                {item.sentToEscrow && (
-                                  <div title={t('rec_sent_tooltip')}>
-                                    <CheckCircle size={14} className="text-emerald-500/50" />
-                                  </div>
-                                )}
-                                <div className={`flex flex-col gap-0.5 overflow-hidden ${item.sentToEscrow ? 'opacity-50' : ''}`}>
-                                    <span className="text-emerald-400 font-mono text-sm font-bold truncate" title={readablePlain}>
-                                        {readablePlain}
-                                    </span>
-                                    <span className="text-slate-500 font-mono text-[10px] truncate" title={item.hash}>
-                                        {item.hash}
-                                    </span>
-                                </div>
+            <Virtuoso
+              className="h-full w-full"
+              data={hashes}
+              itemContent={(_index, item) => {
+                const readablePlain = decodePlain(item.plain);
+                return (
+                    <div 
+                      className={`p-3 border-b border-slate-800/50 transition-colors flex items-center justify-between group ${
+                        item.sentToEscrow ? 'bg-slate-900/30 hover:bg-slate-900/50' : 'hover:bg-slate-900/50'
+                      }`}
+                    >
+                        <div className="flex items-center gap-3 overflow-hidden">
+                            {item.sentToEscrow && (
+                              <div title={t('rec_sent_tooltip')}>
+                                <CheckCircle size={14} className="text-emerald-500/50" />
+                              </div>
+                            )}
+                            <div className={`flex flex-col gap-0.5 overflow-hidden ${item.sentToEscrow ? 'opacity-50' : ''}`}>
+                                <span className="text-emerald-400 font-mono text-sm font-bold truncate" title={readablePlain}>
+                                    {readablePlain}
+                                </span>
+                                <span className="text-slate-500 font-mono text-[10px] truncate" title={item.hash}>
+                                    {item.hash}
+                                </span>
                             </div>
-                            <button 
-                                onClick={() => copyToClipboard(`${item.hash}:${readablePlain}`)}
-                                className="p-2 text-slate-500 hover:text-white hover:bg-slate-800 rounded opacity-0 group-hover:opacity-100 transition-all"
-                                title={t('rec_copy_tooltip')}
-                            >
-                                <Copy size={14} />
-                            </button>
                         </div>
-                    );
-                })}
-            </div>
+                        <button 
+                            onClick={() => copyToClipboard(`${item.hash}:${readablePlain}`)}
+                            className="p-2 text-slate-500 hover:text-white hover:bg-slate-800 rounded opacity-0 group-hover:opacity-100 transition-all"
+                            title={t('rec_copy_tooltip')}
+                        >
+                            <Copy size={14} />
+                        </button>
+                    </div>
+                );
+              }}
+            />
         )}
       </div>
     </div>

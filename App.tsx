@@ -25,7 +25,6 @@ import RemoteAccess from './components/RemoteAccess';
 import File2John from './components/File2John';
 import SessionControls from './components/SessionControls'; 
 
-
 const uuid = () => Math.random().toString(36).substring(2, 9);
 
 const getAttackModeName = (mode: number) => {
@@ -288,16 +287,13 @@ function App() {
       localStorage.setItem('reactor_auto_upload', JSON.stringify(autoUploadSettings));
   }, [autoUploadSettings]);
 
-  // --- Fetch Algorithms (REPLACED geminiService) ---
   useEffect(() => {
     const fetchAlgos = async () => {
         try {
-            // Direct fetch via proxy instead of using geminiService
             const proxyUrl = getSocketUrl() + '/api/escrow/proxy?url=' + encodeURIComponent('https://hashes.com/en/api/algorithms');
             const response = await fetch(proxyUrl);
             const data = await response.json();
             
-            // Handle potentially different response structures
             if (Array.isArray(data)) {
                 setEscrowAlgorithms(data);
             } else if (data.list && Array.isArray(data.list)) {
@@ -389,81 +385,90 @@ function App() {
 
   const newHashesCount = useMemo(() => currentDisplayedCracks.filter(h => !h.sentToEscrow).length, [currentDisplayedCracks]);
 
-  // --- INTELLIGENT MULTI-SESSION AUTO UPLOAD (Fixed & Dependency Free) ---
+  // --- INTELLIGENT MULTI-SESSION AUTO UPLOAD ---
   useEffect(() => {
-    const checkAndUploadAll = async () => {
-        if (!apiKey || !autoUploadSettings.enabled || escrowAlgorithms.length === 0) return;
+    // Only set up the interval if API key is present and auto-upload is enabled
+    if (!apiKey || !autoUploadSettings.enabled) return;
 
-        const sessionKeys = Object.keys(sessions);
+    const checkAndUploadAll = async () => {
+        const currentSessions = sessionsRef.current;
+        const sessionKeys = Object.keys(currentSessions);
 
         for (const sessId of sessionKeys) {
             if (uploadingSessionIds.current.has(sessId)) continue;
 
-            const sess = sessions[sessId];
+            const sess = currentSessions[sessId];
+            if (!sess || !sess.recoveredHashes) continue;
+
             const unsentHashes = sess.recoveredHashes.filter(h => !h.sentToEscrow);
+            const threshold = Number(autoUploadSettings.threshold) || 10;
             
             // Check threshold logic
-            if (unsentHashes.length >= autoUploadSettings.threshold) {
+            if (unsentHashes.length >= threshold) {
                 uploadingSessionIds.current.add(sessId);
                 
-                // Algo Detection Logic
-                let targetAlgoId = '';
-                const hashTypeObj = HASH_TYPES.find(ht => ht.id === sess.hashType);
-                if (hashTypeObj) {
-                     const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
-                     const sessionAlgoName = normalize(hashTypeObj.name.split(' ')[0]);
-                     const matchedAlgo = escrowAlgorithms.find(ea => normalize(ea.algorithmName) === sessionAlgoName);
-                     if (matchedAlgo) targetAlgoId = matchedAlgo.id.toString();
-                }
+                // Algo Detection Logic - Default strictly to the hashcat mode ID
+                let targetAlgoId = sess.hashType;
                 
-                // Fallback Detection
-                if (!targetAlgoId && !isNaN(Number(sess.hashType))) {
-                     if (escrowAlgorithms.some(ea => ea.id.toString() === sess.hashType)) {
-                         targetAlgoId = sess.hashType;
-                     }
+                // If it's not a number (e.g. they typed a string), attempt to parse from known types
+                if (!targetAlgoId || isNaN(Number(targetAlgoId))) {
+                    const hashTypeObj = HASH_TYPES?.find(ht => ht.id === sess.hashType);
+                    if (hashTypeObj && escrowAlgorithms.length > 0) {
+                         const normalize = (s: string) => s?.toLowerCase().replace(/[^a-z0-9]/g, '');
+                         const sessionAlgoName = normalize(hashTypeObj.name.split(' ')[0]);
+                         const matchedAlgo = escrowAlgorithms.find(ea => normalize(ea.algorithmName) === sessionAlgoName);
+                         if (matchedAlgo) targetAlgoId = matchedAlgo.id.toString();
+                    }
                 }
 
-                if (!targetAlgoId) {
-                    addLog(sessId, `[AUTO-UPLOAD] Skipped: Could not auto-detect Hashes.com algorithm for type "${sess.hashType}".`, 'WARN');
+                if (!targetAlgoId || isNaN(Number(targetAlgoId))) {
+                    addLog(sessId, `[AUTO-UPLOAD] Skipped: Target algorithm ID "${sess.hashType}" is invalid or unknown.`, 'WARN');
                     uploadingSessionIds.current.delete(sessId);
                     continue;
                 }
 
-                addLog(sessId, `[AUTO-UPLOAD] Uploading ${unsentHashes.length} hashes to Algo ID ${targetAlgoId}...`, 'INFO');
+                addLog(sessId, `[AUTO-UPLOAD] Threshold reached (${unsentHashes.length}/${threshold}). Sending to Algo ID ${targetAlgoId}...`, 'INFO');
 
                 try {
-                    // --- THE WORKING LOGIC USING FORM DATA ---
                     const content = unsentHashes.map(h => `${h.hash}:${h.plain}`).join('\n');
-                    const blob = new Blob([content], { type: 'text/plain' });
-                    
-                    const formData = new FormData();
-                    formData.append('key', apiKey);
-                    formData.append('algo', targetAlgoId);
-                    // Crucial: Appending as a file/blob allows browser to set correct multipart headers
-                    formData.append('userfile', blob, 'auto_founds.txt');
-
                     const apiUrl = getSocketUrl() + '/api/escrow/proxy';
                     
-                    // Note: No 'Content-Type' header needed; browser adds it with boundary automatically
-                    const response = await fetch(apiUrl, { method: 'POST', body: formData });
+                    const response = await fetch(apiUrl, { 
+                        method: 'POST', 
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            key: apiKey,
+                            algo: targetAlgoId,
+                            fileContent: content
+                        })
+                    });
+                    
                     const res = await response.json();
 
                     if (res.success === true) {
                         addLog(sessId, `[AUTO-UPLOAD] Success! Uploaded ${unsentHashes.length} hashes.`, 'SUCCESS');
-                        setSessions(prev => ({
-                            ...prev,
-                            [sessId]: {
-                                ...prev[sessId],
-                                recoveredHashes: prev[sessId].recoveredHashes.map(h => 
-                                    unsentHashes.some(uh => uh.id === h.id) ? { ...h, sentToEscrow: true } : h
-                                )
-                            }
-                        }));
+                        
+                        // Mark these specific hashes as sent
+                        setSessions(prev => {
+                            const existingSess = prev[sessId];
+                            if (!existingSess) return prev;
+                            return {
+                                ...prev,
+                                [sessId]: {
+                                    ...existingSess,
+                                    recoveredHashes: existingSess.recoveredHashes.map(h => 
+                                        unsentHashes.some(uh => uh.id === h.id) ? { ...h, sentToEscrow: true } : h
+                                    )
+                                }
+                            };
+                        });
                     } else {
-                        addLog(sessId, `[AUTO-UPLOAD] Failed: ${res.message}`, 'WARN');
+                        addLog(sessId, `[AUTO-UPLOAD] Failed: ${res.message || 'Unknown API error'}`, 'WARN');
                     }
                 } catch (e: any) {
-                    addLog(sessId, `[AUTO-UPLOAD] Error: ${e.message}`, 'ERROR');
+                    addLog(sessId, `[AUTO-UPLOAD] Proxy Error: ${e.message}`, 'ERROR');
                 } finally {
                     setTimeout(() => { uploadingSessionIds.current.delete(sessId); }, 2000);
                 }
@@ -471,10 +476,10 @@ function App() {
         }
     };
 
-    const interval = setInterval(checkAndUploadAll, 2000);
+    const interval = setInterval(checkAndUploadAll, 3000); // Check every 3 seconds safely
     return () => clearInterval(interval);
 
-  }, [sessions, autoUploadSettings, apiKey, escrowAlgorithms]);
+  }, [autoUploadSettings.enabled, autoUploadSettings.threshold, apiKey, escrowAlgorithms]);
 
 
   useEffect(() => {
