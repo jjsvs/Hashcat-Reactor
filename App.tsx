@@ -1,16 +1,16 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { 
-  Play, Terminal, LayoutDashboard, 
-  Globe, Zap, ShieldCheck, Hash, Settings, 
-  Link, Unlink, Loader2, Activity, FileUp, 
+import {
+  Play, Terminal, LayoutDashboard,
+  Globe, Zap, ShieldCheck, Hash, Settings,
+  Link, Unlink, Loader2, Activity, FileUp,
   Microscope, Copy, Download, FileDown,
   Square, RefreshCw, FileText, History, X,
   Search, CheckCircle, List, Languages, ChevronUp, Share2, Eye,
-  FileKey 
+  FileKey, Workflow, ChevronDown, CheckCircle2, SkipForward, Clock
 } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
-import { SessionStats, SessionStatus, LogEntry, HistoryPoint, HashcatConfig, RecoveredHash, QueueItem, EscrowAlgo } from './types';
+import { SessionStats, SessionStatus, LogEntry, HistoryPoint, HashcatConfig, RecoveredHash, QueueItem, EscrowAlgo, SmartWorkflowOpts } from './types';
 import { INITIAL_SESSION, DEFAULT_CONFIG, HASH_TYPES } from './constants';
 import LogTerminal from './components/LogTerminal';
 import InteractiveTerminal from './components/InteractiveTerminal';
@@ -23,7 +23,7 @@ import Insights, { PastSession } from './components/Insights';
 import PowerGraph from './components/PowerGraph';
 import RemoteAccess from './components/RemoteAccess';
 import File2John from './components/File2John';
-import SessionControls from './components/SessionControls'; 
+import SessionControls from './components/SessionControls';
 
 const uuid = () => Math.random().toString(36).substring(2, 9);
 
@@ -369,7 +369,24 @@ function App() {
   const [preCrackedResults, setPreCrackedResults] = useState<{ total: number, found: number, list: any[], downloadToken?: string } | null>(null);
   const [isCheckingPotfile, setIsCheckingPotfile] = useState(false);
 
+  const [smartPhase, setSmartPhase] = useState<{ phase: number; message: string } | null>(null);
+
+  interface SmartPhaseEntry { n: number; status: 'pending' | 'running' | 'done' | 'skipped' | 'aborted'; message: string; learned?: number; masks?: number; skippedMasks?: number; phaseRecovered?: number; hashrateHps?: number; hashrateSource?: string; }
+  interface SmartWorkflowState { workflowId: string; currentPhase: number; phases: SmartPhaseEntry[]; complete: boolean; maskFileId?: string; skippedMasks?: number; }
+  const [smartWorkflowState, setSmartWorkflowState] = useState<SmartWorkflowState | null>(null);
+  const smartWorkflowStateRef = useRef<SmartWorkflowState | null>(null);
+  const [swHeaderOpen, setSwHeaderOpen] = useState(false);
+  const swHeaderRef = useRef<HTMLDivElement>(null);
+
   const uploadingSessionIds = useRef<Set<string>>(new Set());
+
+  const autoUploadSettingsRef = useRef(autoUploadSettings);
+  const apiKeyRef = useRef(apiKey);
+  const escrowAlgorithmsRef = useRef(escrowAlgorithms);
+
+  useEffect(() => { autoUploadSettingsRef.current = autoUploadSettings; }, [autoUploadSettings]);
+  useEffect(() => { apiKeyRef.current = apiKey; }, [apiKey]);
+  useEffect(() => { escrowAlgorithmsRef.current = escrowAlgorithms; }, [escrowAlgorithms]);
 
   useEffect(() => {
       isStartingRef.current = isStarting;
@@ -378,6 +395,10 @@ function App() {
   useEffect(() => {
       sessionsRef.current = sessions;
   }, [sessions]);
+
+  useEffect(() => {
+      smartWorkflowStateRef.current = smartWorkflowState;
+  }, [smartWorkflowState]);
 
   const currentDisplayedCracks = useMemo(() => {
       return activeSessionId ? (session.recoveredHashes || []) : [];
@@ -476,10 +497,105 @@ function App() {
         }
     };
 
-    const interval = setInterval(checkAndUploadAll, 3000); // Check every 3 seconds safely
+    const interval = setInterval(checkAndUploadAll, 8000);
     return () => clearInterval(interval);
 
   }, [autoUploadSettings.enabled, autoUploadSettings.threshold, apiKey, escrowAlgorithms]);
+
+  // --- SESSION-END FLUSH: Upload remaining unsent hashes when a session finishes ---
+  const flushSessionHashes = async (sessionId: string) => {
+    const settings = autoUploadSettingsRef.current;
+    const key = apiKeyRef.current;
+    if (!settings.enabled || !key) return;
+
+    const currentSessions = sessionsRef.current;
+    const sess = currentSessions[sessionId];
+    if (!sess || !sess.recoveredHashes) return;
+
+    const unsentHashes = sess.recoveredHashes.filter(h => !h.sentToEscrow);
+    if (unsentHashes.length === 0) return;
+
+    // Skip if already being uploaded by the interval
+    if (uploadingSessionIds.current.has(sessionId)) {
+      // Wait for the interval upload to finish, then re-check for leftovers
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      const recheckSess = sessionsRef.current[sessionId];
+      if (!recheckSess) return;
+      const stillUnsent = recheckSess.recoveredHashes.filter(h => !h.sentToEscrow);
+      if (stillUnsent.length === 0) return;
+      // Fall through to flush the remaining
+    }
+
+    uploadingSessionIds.current.add(sessionId);
+
+    // Resolve the algo ID (same logic as the interval auto-upload)
+    let targetAlgoId = sess.hashType;
+    if (!targetAlgoId || isNaN(Number(targetAlgoId))) {
+      const hashTypeObj = HASH_TYPES?.find(ht => ht.id === sess.hashType);
+      if (hashTypeObj && escrowAlgorithmsRef.current.length > 0) {
+        const normalize = (s: string) => s?.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const sessionAlgoName = normalize(hashTypeObj.name.split(' ')[0]);
+        const matchedAlgo = escrowAlgorithmsRef.current.find(ea => normalize(ea.algorithmName) === sessionAlgoName);
+        if (matchedAlgo) targetAlgoId = matchedAlgo.id.toString();
+      }
+    }
+
+    if (!targetAlgoId || isNaN(Number(targetAlgoId))) {
+      addLog(sessionId, `[SESSION-END FLUSH] Skipped: Cannot resolve algorithm ID for "${sess.hashType}".`, 'WARN');
+      uploadingSessionIds.current.delete(sessionId);
+      return;
+    }
+
+    // Re-fetch unsent in case interval uploaded some while we resolved the algo
+    const finalSess = sessionsRef.current[sessionId];
+    const finalUnsent = finalSess ? finalSess.recoveredHashes.filter(h => !h.sentToEscrow) : [];
+    if (finalUnsent.length === 0) {
+      uploadingSessionIds.current.delete(sessionId);
+      return;
+    }
+
+    addLog(sessionId, `[SESSION-END FLUSH] Session ended with ${finalUnsent.length} unsent hashes (below threshold of ${settings.threshold}). Flushing...`, 'INFO');
+
+    try {
+      const content = finalUnsent.map(h => `${h.hash}:${h.plain}`).join('\n');
+      const apiUrl = getSocketUrl() + '/api/escrow/proxy';
+
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          key,
+          algo: targetAlgoId,
+          fileContent: content
+        })
+      });
+
+      const res = await response.json();
+
+      if (res.success === true) {
+        addLog(sessionId, `[SESSION-END FLUSH] Success! Uploaded ${finalUnsent.length} remaining hashes.`, 'SUCCESS');
+        setSessions(prev => {
+          const existingSess = prev[sessionId];
+          if (!existingSess) return prev;
+          return {
+            ...prev,
+            [sessionId]: {
+              ...existingSess,
+              recoveredHashes: existingSess.recoveredHashes.map(h =>
+                finalUnsent.some(uh => uh.id === h.id) ? { ...h, sentToEscrow: true } : h
+              )
+            }
+          };
+        });
+      } else {
+        addLog(sessionId, `[SESSION-END FLUSH] Failed: ${res.message || 'Unknown API error'}`, 'WARN');
+      }
+    } catch (e: any) {
+      addLog(sessionId, `[SESSION-END FLUSH] Error: ${e.message}`, 'ERROR');
+    } finally {
+      uploadingSessionIds.current.delete(sessionId);
+    }
+  };
 
 
   useEffect(() => {
@@ -521,24 +637,79 @@ function App() {
 
           sessionRunningRef.current = true;
           const nextJob = jobQueue[0];
-          addLog('general', `[QUEUE] Auto-starting next job: ${nextJob.id}`, 'INFO');
+          addLog('general', `[QUEUE] Auto-starting next job: ${nextJob.id}${nextJob.workflowOpts ? ' [Smart Workflow]' : ''}`, 'INFO');
           setIsStarting(true);
-          
+
           try {
-              const payload = { ...nextJob.config };
-              const res = await fetch(getSocketUrl() + '/api/session/start', { 
-                  method: 'POST', 
-                  headers: { 'Content-Type': 'application/json' }, 
-                  body: JSON.stringify(payload)
-              });
-              
-              const data = await res.json();
-              if (data.sessionId) {
-                  runningConfigs.current[data.sessionId] = nextJob.config;
-                  setJobQueue(prev => prev.slice(1));
-                  setActiveTab('dashboard');
+              if (nextJob.workflowOpts) {
+                  // Smart Workflow queue job — use the config snapshot saved at queue-add time
+                  const wOpts = nextJob.workflowOpts;
+                  const qCfg = nextJob.config;
+                  const unitToSec = wOpts.phase3TimeUnit === 'minutes' ? 60 : wOpts.phase3TimeUnit === 'hours' ? 3600 : 86400;
+                  const payload = {
+                      targetPath: qCfg.targetPath,
+                      hashType: qCfg.hashType,
+                      wordlistPath: qCfg.wordlistPath,
+                      initialRulePath: wOpts.rulePath || undefined,
+                      // Global performance / hardware flags (snapshotted from config at queue time)
+                      workloadProfile: qCfg.workloadProfile,
+                      devices: qCfg.devices || undefined,
+                      optimizedKernel: qCfg.optimizedKernel,
+                      statusTimer: qCfg.statusTimer || 3,
+                      hwmonDisable: qCfg.hwmonDisable,
+                      backendDisableOpenCL: qCfg.backendDisableOpenCL,
+                      backendIgnoreCuda: qCfg.backendIgnoreCuda,
+                      selfTestDisable: qCfg.selfTestDisable,
+                      keepGuessing: qCfg.keepGuessing,
+                      logfileDisable: qCfg.logfileDisable,
+                      force: qCfg.force,
+                      bitmapMax: qCfg.bitmapMax,
+                      remove: qCfg.remove,
+                      // Workflow-specific
+                      maskMinLen: wOpts.maskMinLen,
+                      maskMaxLen: wOpts.maskMaxLen,
+                      phase3Runtime: wOpts.phase3Runtime * 60,
+                      phase3Increment: wOpts.phase3Increment,
+                      maxMasks: wOpts.maxMasks,
+                      skipPhase3: wOpts.skipPhase3,
+                      skipPhase4: wOpts.skipPhase4,
+                      phase3TimeBudgetSeconds: wOpts.phase3TimeBudget > 0 ? Math.round(wOpts.phase3TimeBudget * unitToSec) : 0,
+                      phase3HashrateHps: 0,
+                      historicalHashrateHps: historicalHashrateForAlgo(qCfg.hashType),
+                      phase3SortMode: wOpts.phase3SortMode,
+                  };
+                  const res = await fetch(getSocketUrl() + '/api/smart-workflow/start', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify(payload),
+                  });
+                  const data = await res.json();
+                  if (data.workflowId) {
+                      runningConfigs.current[data.workflowId] = nextJob.config;
+                      setSmartWorkflowState(null);
+                      setJobQueue(prev => prev.slice(1));
+                      setActiveTab('dashboard');
+                  } else {
+                      sessionRunningRef.current = false;
+                  }
               } else {
-                   sessionRunningRef.current = false;
+                  // Regular session queue job
+                  setSmartWorkflowState(null);
+                  setSmartPhase(null);
+                  const payload = { ...nextJob.config };
+                  const res = await fetch(getSocketUrl() + '/api/session/start', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify(payload)
+                  });
+                  const data = await res.json();
+                  if (data.sessionId) {
+                      runningConfigs.current[data.sessionId] = nextJob.config;
+                      setJobQueue(prev => prev.slice(1));
+                      setActiveTab('dashboard');
+                  } else {
+                      sessionRunningRef.current = false;
+                  }
               }
           } catch (e: any) {
               addLog('general', `[QUEUE] Failed to start job: ${e.message}`, 'ERROR');
@@ -549,7 +720,7 @@ function App() {
           }
       };
 
-      const timer = setTimeout(processQueue, 1000); 
+      const timer = setTimeout(processQueue, 2500);
       return () => clearTimeout(timer);
   }, [backendConnected, isQueueProcessing, jobQueue, sessions, isStarting]);
 
@@ -608,7 +779,30 @@ function App() {
       });
       socket.on('session_finished', (data: any) => {
           sessionRunningRef.current = false;
+          // Finalize SW state BEFORE saveSessionHistory so the saved phaseBreakdown
+          // reflects any abort markers we add below (saveSessionHistory reads
+          // smartWorkflowStateRef.current).
+          const prev = smartWorkflowStateRef.current;
+          if (prev?.workflowId === data.sessionId && !prev.complete) {
+              // Workflow is wrapping up without a natural P4 completion — treat
+              // any phase still 'running' or 'pending' as interrupted.
+              const phases = prev.phases.map(p =>
+                  (p.status === 'running' || p.status === 'pending')
+                      ? { ...p, status: 'aborted' as const, message: p.status === 'running' ? `${p.message || ''}${p.message ? ' · ' : ''}interrupted` : 'aborted before start' }
+                      : p
+              );
+              const finalized: SmartWorkflowState = { ...prev, phases, complete: true };
+              smartWorkflowStateRef.current = finalized;
+              setSmartWorkflowState(finalized);
+              setSmartPhase(null);
+          } else if (prev?.workflowId === data.sessionId) {
+              setSmartPhase(null);
+              const finalized: SmartWorkflowState = { ...prev, complete: true };
+              smartWorkflowStateRef.current = finalized;
+              setSmartWorkflowState(finalized);
+          }
           saveSessionHistory(data.sessionId, data.duration, data.recovered, data.total, data.avgHashrate, data.avgPower);
+          flushSessionHashes(data.sessionId);
       });
       socket.on('session_deleted', (data: { sessionId: string }) => {
           sessionRunningRef.current = false;
@@ -622,6 +816,52 @@ function App() {
         else if (type === 'recovered') updateSession(sessionId, { recovered: value });
         else if (type === 'total') updateSession(sessionId, { total: value });
         else if (type === 'time_estimated') updateSession(sessionId, { estimatedTimeRemaining: value });
+      });
+      socket.on('smart_workflow_phase', (data: { workflowId: string; phase: number; message: string; complete?: boolean; skipped?: boolean; learned?: number; masks?: number; skippedMasks?: number; maskFileId?: string; phaseRecovered?: number; hashrateHps?: number; hashrateSource?: string }) => {
+          const isDone = data.complete || data.skipped;
+          setSmartPhase(data.complete ? null : { phase: data.phase, message: data.message });
+          addLog(data.workflowId, `[Smart Phase ${data.phase}/4] ${data.message}`, 'INFO');
+          if (data.learned !== undefined) addLog(data.workflowId, `  ↳ Learned ${data.learned} passwords, generated ${data.masks} mask patterns${data.skippedMasks ? ` (${data.skippedMasks} exceed time budget — saved for download)` : ''}`, 'SUCCESS');
+          if (data.hashrateHps && data.hashrateHps > 0) addLog(data.workflowId, `  ↳ Assets budgeted against ${(data.hashrateHps / 1e6).toFixed(2)} MH/s (${data.hashrateSource || 'unknown'})`, 'INFO');
+
+          // Compute next state from the ref (always current) so smartWorkflowStateRef is
+          // updated synchronously. This guarantees a follow-up session_finished event in
+          // the same socket batch sees the just-committed phaseRecovered when it reads
+          // smartWorkflowStateRef.current in saveSessionHistory.
+          const prev = smartWorkflowStateRef.current;
+          const base = prev?.workflowId === data.workflowId ? prev : {
+              workflowId: data.workflowId,
+              currentPhase: data.phase,
+              phases: [1, 2, 3, 4].map(n => ({ n, status: 'pending' as const, message: '' })),
+              complete: false,
+              maskFileId: undefined as string | undefined,
+              skippedMasks: undefined as number | undefined,
+          };
+          const phases = base.phases.map(p => {
+              if (p.n < data.phase) return { ...p, status: 'done' as const };
+              if (p.n === data.phase) return {
+                  ...p,
+                  status: (data.skipped ? 'skipped' : isDone && data.phase === 4 ? 'done' : data.complete ? 'done' : 'running') as SmartPhaseEntry['status'],
+                  message: data.message,
+                  learned: data.learned,
+                  masks: data.masks,
+                  skippedMasks: data.skippedMasks,
+                  phaseRecovered: data.phaseRecovered !== undefined ? (p.phaseRecovered || 0) + data.phaseRecovered : p.phaseRecovered,
+                  hashrateHps: data.hashrateHps !== undefined ? data.hashrateHps : p.hashrateHps,
+                  hashrateSource: data.hashrateSource !== undefined ? data.hashrateSource : p.hashrateSource,
+              };
+              return p;
+          });
+          const nextState: SmartWorkflowState = {
+              workflowId: data.workflowId,
+              currentPhase: data.phase,
+              phases,
+              complete: !!data.complete,
+              maskFileId: data.maskFileId || base.maskFileId,
+              skippedMasks: data.skippedMasks !== undefined ? data.skippedMasks : base.skippedMasks,
+          };
+          smartWorkflowStateRef.current = nextState;
+          setSmartWorkflowState(nextState);
       });
       socket.on('session_crack', (data: any) => {
           setSessions(prev => {
@@ -665,41 +905,108 @@ function App() {
       } catch(e) { console.error("Failed to delete session", e); }
   };
 
+  // Rolling log window. Sessions can run for days; keeping every line would balloon
+  // memory and slow rendering. Drop entries older than LOG_RETENTION_MS on every
+  // append, with a hard cap as a safety net for bursts inside the retention window.
+  const LOG_RETENTION_MS = 3 * 60 * 1000; // ~3 minutes
+  const LOG_HARD_CAP = 1000;
   const addLog = (sessionId: string, message: string, level: LogEntry['level'] = 'INFO') => {
     const entry = { id: uuid(), sessionId, timestamp: new Date(), level, message };
     setSessionLogs(prev => {
         const sessionLog = prev[sessionId] || [];
-        return { ...prev, [sessionId]: [...sessionLog.slice(-99), entry] };
+        const cutoff = Date.now() - LOG_RETENTION_MS;
+        const pruned = sessionLog.filter(l => {
+            const t = l.timestamp instanceof Date ? l.timestamp.getTime() : new Date(l.timestamp).getTime();
+            return t >= cutoff;
+        });
+        const capped = pruned.length > LOG_HARD_CAP ? pruned.slice(-LOG_HARD_CAP) : pruned;
+        return { ...prev, [sessionId]: [...capped, entry] };
     });
   };
 
+  // Periodic cleanup so stale logs drop out of view even while the session is idle
+  // (no new appends triggering the in-addLog prune).
+  useEffect(() => {
+    const interval = setInterval(() => {
+        setSessionLogs(prev => {
+            const cutoff = Date.now() - LOG_RETENTION_MS;
+            let changed = false;
+            const next: Record<string, LogEntry[]> = {};
+            for (const sid of Object.keys(prev)) {
+                const entries = prev[sid];
+                const filtered = entries.filter(l => {
+                    const t = l.timestamp instanceof Date ? l.timestamp.getTime() : new Date(l.timestamp).getTime();
+                    return t >= cutoff;
+                });
+                if (filtered.length !== entries.length) changed = true;
+                next[sid] = filtered;
+            }
+            return changed ? next : prev;
+        });
+    }, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
   const saveSessionHistory = (sessionId: string, duration: number, recovered: number, total: number, avgHashrate: number, avgPower: number) => {
-      if (!avgHashrate || avgHashrate <= 0) {
+      const currentSessionData = sessionsRef.current[sessionId];
+      const recoveredHashes = currentSessionData ? currentSessionData.recoveredHashes : [];
+
+      // Skip only sessions that clearly never ran: sub-3-second duration, zero hashrate,
+      // and nothing recovered.  Any session that ran for ≥ 3 s is always saved so that
+      // legitimate wordlist/brute-force attacks aren't silently dropped when they crack
+      // nothing (e.g. wrong password list) or exit at exhaustion with a 0 H/s status line.
+      const isDegenerate = (duration < 3) && (avgHashrate <= 0) && (recoveredHashes.length === 0) && (recovered <= 0);
+      if (isDegenerate) {
           delete runningConfigs.current[sessionId];
           delete sessionStartTimes.current[sessionId];
           return;
       }
       const usedConfig = runningConfigs.current[sessionId] || config;
       const date = sessionStartTimes.current[sessionId] ? new Date(sessionStartTimes.current[sessionId]) : new Date();
-      const currentSessionData = sessionsRef.current[sessionId];
-      const recoveredHashes = currentSessionData ? currentSessionData.recoveredHashes : [];
-      
+
+      // Detect smart workflow sessions by name or workflow state
+      const sessionName = currentSessionData?.name || '';
+      const swState = smartWorkflowStateRef.current;
+      const isWorkflow = sessionName.startsWith('Smart Workflow') || swState?.workflowId === sessionId;
+
+      // Capture phase breakdown for smart workflow sessions
+      const phaseLabels = ['Dictionary Attack', 'Generate Assets', 'Mask Attack', 'Feedback Rules'];
+      const phaseBreakdown = isWorkflow && swState?.workflowId === sessionId
+          ? swState.phases.map(p => ({
+              phase: p.n,
+              label: phaseLabels[p.n - 1] || `Phase ${p.n}`,
+              recovered: p.phaseRecovered || 0,
+              status: p.status,
+              learned: p.learned,
+              masks: p.masks,
+              hashrateHps: p.hashrateHps,
+              hashrateSource: p.hashrateSource,
+          }))
+          : undefined;
+
       // Generate actual snapshot data
       const analysisSnapshot = generateSnapshot(recoveredHashes, avgHashrate);
-      
+
+      // Use recovered hashes count from session if backend reported 0
+      const finalRecovered = recovered > 0 ? recovered : recoveredHashes.length;
+
       const pastSession: PastSession = {
           id: uuid(),
           date: date,
           duration: duration || 0,
           mode: HASH_TYPES.find(h => h.id === usedConfig.hashType)?.name || usedConfig.hashType,
           algorithmId: usedConfig.hashType,
-          attackType: getAttackModeName(usedConfig.attackMode),
-          attackMode: usedConfig.attackMode,
-          recovered: recovered, 
-          totalHashes: total, 
+          attackType: isWorkflow ? 'Smart Workflow' : getAttackModeName(usedConfig.attackMode),
+          attackMode: isWorkflow ? 0 : usedConfig.attackMode,
+          recovered: finalRecovered,
+          totalHashes: total,
           avgHashrate: avgHashrate || 0,
           powerUsage: avgPower || 0,
-          analysis: analysisSnapshot 
+          analysis: analysisSnapshot,
+          phaseBreakdown,
+          maskFileId: isWorkflow && swState?.workflowId === sessionId ? swState.maskFileId : undefined,
+          skippedMasks: isWorkflow && swState?.workflowId === sessionId ? swState.skippedMasks : undefined,
+          sessionId: sessionId,
       };
       
       delete runningConfigs.current[sessionId];
@@ -713,11 +1020,22 @@ function App() {
       }).catch(console.error);
   };
 
+  // Close SW header dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (swHeaderRef.current && !swHeaderRef.current.contains(e.target as Node)) {
+        setSwHeaderOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
   useEffect(() => {
     if (backendConnected && status === SessionStatus.RUNNING) {
        const interval = setInterval(() => {
           setHistory(h => [...h.slice(-59), { timestamp: Date.now(), hashrate: session.hashrate / 1000000, temp: 0 }]);
-       }, 1000);
+       }, 2000);
        return () => clearInterval(interval);
     }
   }, [backendConnected, status, session.hashrate]);
@@ -795,6 +1113,167 @@ function App() {
       } catch (e: any) { addLog('general', `Queue Error: ${e.message}`, 'ERROR'); }
   };
 
+  // --- SMART WORKFLOW ---
+  // Historical hashrate lookup for a given algorithm, mirroring the Insights
+  // compensation logic. Preferred over a live measurement when the live rate is
+  // artificially depressed (e.g. Phase 1 finishing a tiny dictionary before the
+  // GPU reaches steady state).
+  const historicalHashrateForAlgo = (algoId: string): number => {
+    const matching = (pastSessions || []).filter(s => s.algorithmId === algoId && s.avgHashrate > 0);
+    if (matching.length === 0) return 0;
+    const bf = matching.filter(s => s.attackMode === 3);
+    if (bf.length > 0) return bf.reduce((acc, s) => acc + s.avgHashrate, 0) / bf.length;
+    const maxRate = Math.max(...matching.map(s => s.avgHashrate));
+    return maxRate * 1.4; // same compensation as Insights.detectHashrateForAlgo
+  };
+
+  // Effective smart-workflow state for the currently selected session. The
+  // widget is only shown when the selected session IS a smart workflow — either
+  // a live run whose workflowId matches, or a past session whose phaseBreakdown
+  // was recorded. Selecting any non-SW session hides the widget entirely.
+  const effectiveSwState = useMemo<SmartWorkflowState | null>(() => {
+    // No session selected: fall through to the live workflow state if one is running.
+    if (!activeSessionId) return smartWorkflowState;
+    // Live workflow that matches the selected session.
+    if (smartWorkflowState && smartWorkflowState.workflowId === activeSessionId) {
+      return smartWorkflowState;
+    }
+    // Past smart workflow session — rehydrate a frozen snapshot. Match on the
+    // saved sessionId first, then fall back to maskFileId (older sessions that
+    // pre-date the sessionId field still carry the workflowId there).
+    const candidates = (pastSessions || []).filter(p => p.phaseBreakdown && p.phaseBreakdown.length > 0);
+    const past = candidates.find(p => p.sessionId === activeSessionId)
+              || candidates.find(p => p.maskFileId === activeSessionId);
+    if (!past || !past.phaseBreakdown) return null;
+    const phases: SmartPhaseEntry[] = past.phaseBreakdown.map(p => ({
+      n: p.phase,
+      status: p.status,
+      message: '',
+      learned: p.learned,
+      masks: p.masks,
+      phaseRecovered: p.recovered,
+      hashrateHps: p.hashrateHps,
+      hashrateSource: p.hashrateSource,
+    }));
+    return {
+      workflowId: past.sessionId || past.maskFileId || past.id,
+      currentPhase: phases.length,
+      phases,
+      complete: true,
+      maskFileId: past.maskFileId,
+      skippedMasks: past.skippedMasks,
+    };
+  }, [smartWorkflowState, activeSessionId, pastSessions]);
+
+  const buildWorkflowPayload = (targetPath: string, opts: SmartWorkflowOpts) => {
+    const unitToSec = opts.phase3TimeUnit === 'minutes' ? 60 : opts.phase3TimeUnit === 'hours' ? 3600 : 86400;
+    const phase3TimeBudgetSeconds = opts.phase3TimeBudget > 0 ? Math.round(opts.phase3TimeBudget * unitToSec) : 0;
+    const historicalHashrateHps = historicalHashrateForAlgo(config.hashType);
+    return {
+      // Target & attack config
+      targetPath,
+      hashType: config.hashType,
+      wordlistPath: config.wordlistPath,
+      initialRulePath: opts.rulePath || undefined,
+      // ── Global performance / hardware flags (from Config menu) ──
+      workloadProfile: config.workloadProfile,
+      devices: config.devices || undefined,
+      optimizedKernel: config.optimizedKernel,   // -O from global config
+      statusTimer: config.statusTimer || 3,        // --status-timer
+      hwmonDisable: config.hwmonDisable,           // --hwmon-disable
+      backendDisableOpenCL: config.backendDisableOpenCL, // --backend-ignore-opencl
+      backendIgnoreCuda: config.backendIgnoreCuda, // --backend-ignore-cuda
+      selfTestDisable: config.selfTestDisable,     // --self-test-disable
+      keepGuessing: config.keepGuessing,           // --keep-guessing
+      logfileDisable: config.logfileDisable,       // --logfile-disable
+      force: config.force,                         // --force
+      bitmapMax: config.bitmapMax,                 // --bitmap-max
+      remove: config.remove,                       // --remove
+      // ── Workflow-specific Phase 3 controls ──
+      maskMinLen: opts.maskMinLen,
+      maskMaxLen: opts.maskMaxLen,
+      phase3Runtime: opts.phase3Runtime * 60,      // minutes → seconds for --runtime
+      phase3Increment: opts.phase3Increment,
+      maxMasks: opts.maxMasks,
+      skipPhase3: opts.skipPhase3,
+      skipPhase4: opts.skipPhase4,
+      phase4RulePaths: opts.phase4RulePaths || [],
+      phase3TimeBudgetSeconds,
+      phase3HashrateHps: session.hashrate > 0 ? session.hashrate : 0,
+      historicalHashrateHps,
+      phase3SortMode: opts.phase3SortMode,
+    };
+  };
+
+  const handleStartSmartWorkflow = async (opts: SmartWorkflowOpts) => {
+    if (!backendConnected) { addLog('general', 'Smart Workflow: Backend disconnected.', 'ERROR'); return; }
+
+    setIsStarting(true);
+    sessionRunningRef.current = true;
+    setSmartWorkflowState(null);
+    setActiveTab('dashboard');
+
+    try {
+      let targetPath = await prepareTarget();
+      if (!targetPath) {
+        addLog('general', 'Smart Workflow aborted: No target file selected.', 'ERROR');
+        sessionRunningRef.current = false;
+        setIsStarting(false);
+        return;
+      }
+
+      const payload = buildWorkflowPayload(targetPath, opts);
+
+      const res = await fetch(getSocketUrl() + '/api/smart-workflow/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (data.workflowId) {
+        runningConfigs.current[data.workflowId] = config;
+        updateSession(data.workflowId, { hashType: config.hashType });
+        setActiveSessionId(data.workflowId);
+      } else {
+        sessionRunningRef.current = false;
+      }
+    } catch (e: any) {
+      addLog('general', `Smart Workflow Error: ${e.message}`, 'ERROR');
+      sessionRunningRef.current = false;
+    } finally {
+      setIsStarting(false);
+    }
+  };
+
+  const handleQueueSmartWorkflow = async (opts: SmartWorkflowOpts) => {
+    try {
+      let targetPath = config.targetPath;
+      let targetSummary = config.targetPath;
+      if (!targetPath) {
+        const manualPath = await prepareTarget();
+        if (manualPath) {
+          targetPath = manualPath;
+          targetSummary = manualTargetFile ? manualTargetFile.name : 'Manual Input Buffer';
+        } else {
+          addLog('general', 'Cannot queue workflow: No target selected.', 'ERROR');
+          return;
+        }
+      }
+      const queueConfig = { ...config, targetPath };
+      const newJob: QueueItem = {
+        id: uuid(),
+        config: queueConfig,
+        status: 'PENDING',
+        addedAt: Date.now(),
+        targetSummary: targetSummary || 'Unknown',
+        workflowOpts: opts,
+      };
+      setJobQueue(prev => [...prev, newJob]);
+      addLog('general', `Added Smart Workflow to queue. Position: ${jobQueue.length + 1}`, 'SUCCESS');
+      setActiveTab('queue');
+    } catch (e: any) { addLog('general', `Queue Error: ${e.message}`, 'ERROR'); }
+  };
+
   // --- MANUAL START ---
   const toggleSession = async (overrideCommand?: string) => {
     if (activeSessionId && (session.status === SessionStatus.RUNNING || session.status === SessionStatus.PAUSED)) {
@@ -835,6 +1314,9 @@ function App() {
         if (data.sessionId) {
             runningConfigs.current[data.sessionId] = config;
             updateSession(data.sessionId, { hashType: config.hashType });
+            // Clear any active workflow card — this is a regular session
+            setSmartWorkflowState(null);
+            setSmartPhase(null);
         } else {
              sessionRunningRef.current = false;
         }
@@ -930,8 +1412,8 @@ function App() {
                 </button>
                 <button onClick={() => setActiveTab('insights')} className={`w-full flex items-center p-3 rounded-lg transition-all mb-1 ${activeTab === 'insights' ? 'bg-indigo-600/10 text-indigo-400 border border-indigo-600/20' : 'text-slate-400 hover:bg-slate-900'}`}><Microscope size={20} /><span className="ml-3 hidden lg:block font-medium">{t('nav_insights')}</span></button>
                 <button onClick={() => setActiveTab('escrow')} className={`w-full flex items-center p-3 rounded-lg transition-all mb-1 ${activeTab === 'escrow' ? 'bg-indigo-600/10 text-indigo-400 border border-indigo-600/20' : 'text-slate-400 hover:bg-slate-900'}`}><Globe size={20} /><span className="ml-3 hidden lg:block font-medium">{t('nav_escrow')}</span></button>
-                
-                {/* File2John Tab Button with i18n */}
+
+{/* File2John Tab Button with i18n */}
                 <button onClick={() => setActiveTab('file2john')} className={`w-full flex items-center p-3 rounded-lg transition-all mb-1 ${activeTab === 'file2john' ? 'bg-indigo-600/10 text-indigo-400 border border-indigo-600/20' : 'text-slate-400 hover:bg-slate-900'}`}>
                    <FileKey size={20} />
                    <span className="ml-3 hidden lg:block font-medium">{t('nav_extractor')}</span>
@@ -981,7 +1463,150 @@ function App() {
           <div className="flex items-center gap-4"><div><h1 className="text-xs text-slate-400 font-bold uppercase">{t('active_target')}</h1><span className="text-slate-100 font-mono text-sm">{activeSessionId ? (session.target || t('target_na')) : t('target_configure')}</span></div></div>
           <div className="flex items-center gap-3">
              {jobQueue.length > 0 && (<div className="flex items-center gap-2 px-3 py-1 bg-slate-900 border border-slate-800 rounded-lg text-xs font-bold text-slate-400"><List size={14} /><span>{t('Queue pending', { count: jobQueue.length })}</span>{isQueueProcessing && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>}</div>)}
-            
+
+            {/* Smart Workflow header indicator + dropdown */}
+            {effectiveSwState && (() => {
+              const swSession = sessions[effectiveSwState.workflowId];
+              const swPhaseLabels = ['Dictionary Attack', 'Generate Assets', 'Mask Attack', 'Feedback Rules'];
+              const phaseIcons = [Play, Zap, SkipForward, RefreshCw];
+              return (
+                <div ref={swHeaderRef} className="relative">
+                  <button
+                    onClick={() => setSwHeaderOpen(v => !v)}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors border ${
+                      effectiveSwState.complete && effectiveSwState.phases.some(p => p.status === 'aborted')
+                        ? 'bg-red-900/20 border-red-700/30 text-red-300'
+                        : effectiveSwState.complete
+                        ? 'bg-emerald-900/20 border-emerald-700/30 text-emerald-300'
+                        : 'bg-indigo-900/30 border-indigo-700/40 text-indigo-300 hover:bg-indigo-900/50'
+                    }`}
+                  >
+                    <Workflow size={13} className="shrink-0" />
+                    {effectiveSwState.complete && effectiveSwState.phases.some(p => p.status === 'aborted') ? (
+                      <span className="flex items-center gap-1"><X size={11} /> Aborted</span>
+                    ) : effectiveSwState.complete ? (
+                      <span className="flex items-center gap-1"><CheckCircle2 size={11} /> Complete</span>
+                    ) : smartPhase ? (
+                      <>
+                        <span className="bg-indigo-600 text-white rounded px-1.5 py-0.5 text-[10px]">P{smartPhase.phase}/4</span>
+                        <span className="hidden sm:inline max-w-[140px] truncate">{smartPhase.message}</span>
+                        <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse shrink-0"></span>
+                      </>
+                    ) : (
+                      <span>Smart Workflow</span>
+                    )}
+                    <ChevronDown size={12} className={`shrink-0 transition-transform ${swHeaderOpen ? 'rotate-180' : ''}`} />
+                  </button>
+
+                  {swHeaderOpen && (
+                    <div className="absolute right-0 top-full mt-2 w-[720px] max-w-[calc(100vw-2rem)] bg-slate-900 border border-indigo-900/50 rounded-xl shadow-2xl z-50 overflow-hidden animate-in slide-in-from-top-2 fade-in duration-150">
+                      {/* Dropdown header */}
+                      <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-800 bg-slate-950/50">
+                        <div className="flex items-center gap-2">
+                          <Workflow size={14} className="text-indigo-400" />
+                          <span className="text-xs font-bold text-indigo-300">Smart Workflow</span>
+                          {effectiveSwState.complete && effectiveSwState.phases.some(p => p.status === 'aborted') ? (
+                            <span className="text-[10px] font-bold bg-red-700/40 text-red-300 rounded px-1.5 py-0.5 flex items-center gap-1"><X size={9} /> Aborted</span>
+                          ) : effectiveSwState.complete && (
+                            <span className="text-[10px] font-bold bg-emerald-700/40 text-emerald-300 rounded px-1.5 py-0.5 flex items-center gap-1"><CheckCircle2 size={9} /> Complete</span>
+                          )}
+                        </div>
+                        {!effectiveSwState.complete && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); toggleSession(); setSwHeaderOpen(false); }}
+                            className="flex items-center gap-1 px-2 py-0.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 rounded text-[10px] font-bold transition-colors"
+                          >
+                            <Square size={9} fill="currentColor" /> STOP
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Phase grid */}
+                      <div className="p-3 grid grid-cols-4 gap-2">
+                        {effectiveSwState.phases.map((phase) => {
+                          const Icon = phaseIcons[phase.n - 1];
+                          const isRunning = phase.status === 'running';
+                          const isDone = phase.status === 'done';
+                          const isSkipped = phase.status === 'skipped';
+                          const isAborted = phase.status === 'aborted';
+                          return (
+                            <div
+                              key={phase.n}
+                              className={`rounded-lg p-2.5 border transition-colors ${
+                                isRunning ? 'bg-indigo-950/60 border-indigo-700/50' :
+                                isDone ? 'bg-emerald-950/30 border-emerald-800/30' :
+                                isAborted ? 'bg-red-950/30 border-red-900/40' :
+                                isSkipped ? 'bg-slate-900/50 border-slate-800/50' :
+                                'bg-slate-950/40 border-slate-800/30'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between mb-1">
+                                <span className={`text-[9px] font-bold uppercase ${isRunning ? 'text-indigo-400' : isDone ? 'text-emerald-400' : isAborted ? 'text-red-400' : 'text-slate-600'}`}>P{phase.n}</span>
+                                <span className="shrink-0">
+                                  {isRunning && <Loader2 size={11} className="text-indigo-400 animate-spin" />}
+                                  {isDone && <CheckCircle2 size={11} className="text-emerald-400" />}
+                                  {isSkipped && <span className="text-[8px] text-slate-600 font-bold">SKIP</span>}
+                                  {isAborted && <X size={11} className="text-red-400" />}
+                                  {phase.status === 'pending' && <Icon size={11} className="text-slate-700" />}
+                                </span>
+                              </div>
+                              <div className={`text-[10px] font-medium leading-tight ${isRunning ? 'text-indigo-200' : isDone ? 'text-slate-300' : isAborted ? 'text-red-300' : 'text-slate-600'}`}>
+                                {swPhaseLabels[phase.n - 1]}
+                              </div>
+                              {phase.message && (
+                                <div className="text-[10px] text-slate-500 mt-0.5 leading-snug break-words" title={phase.message}>
+                                  {phase.message}
+                                </div>
+                              )}
+                              {phase.learned !== undefined && (
+                                <div className="text-[10px] text-emerald-500 mt-1">{phase.learned} cracked · {phase.masks} masks</div>
+                              )}
+                              {phase.hashrateHps !== undefined && phase.hashrateHps > 0 && (
+                                <div
+                                  className="text-[10px] text-indigo-300 mt-0.5 leading-snug break-words"
+                                  title={`Asset budget computed against ${(phase.hashrateHps / 1e6).toFixed(2)} MH/s — source: ${phase.hashrateSource || 'unknown'}`}
+                                >
+                                  @ {(phase.hashrateHps / 1e6).toFixed(2)} MH/s
+                                  {phase.hashrateSource && (
+                                    <span className="text-slate-500"> · {phase.hashrateSource}</span>
+                                  )}
+                                </div>
+                              )}
+                              {phase.phaseRecovered !== undefined && phase.phaseRecovered > 0 && (
+                                <div className="text-[9px] text-emerald-400 font-bold mt-0.5">+{phase.phaseRecovered} recovered</div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Live stats row */}
+                      {!effectiveSwState.complete && swSession && (
+                        <div className="px-3 pb-3 grid grid-cols-4 gap-2 border-t border-slate-800 pt-2.5">
+                          <div className="flex flex-col gap-0.5">
+                            <span className="text-[9px] text-slate-600 uppercase font-bold">Hashrate</span>
+                            <span className="text-[11px] font-mono text-indigo-300">{formatHashrate(swSession.hashrate || 0)}</span>
+                          </div>
+                          <div className="flex flex-col gap-0.5">
+                            <span className="text-[9px] text-slate-600 uppercase font-bold">Progress</span>
+                            <span className="text-[11px] font-mono text-blue-300">{(swSession.progress || 0).toFixed(2)}%</span>
+                          </div>
+                          <div className="flex flex-col gap-0.5">
+                            <span className="text-[9px] text-slate-600 uppercase font-bold">Recovered</span>
+                            <span className="text-[11px] font-mono text-emerald-300">{swSession.recovered || 0} / {swSession.total || '?'}</span>
+                          </div>
+                          <div className="flex flex-col gap-0.5">
+                            <span className="text-[9px] text-slate-600 uppercase font-bold">ETA</span>
+                            <span className="text-[11px] font-mono text-slate-300 truncate">{swSession.estimatedTimeRemaining || '—'}</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
             {/* Session Controls */}
             <SessionControls 
                 sessionId={activeSessionId} 
@@ -1020,6 +1645,7 @@ function App() {
                   <div className="lg:col-span-3 h-full min-h-0 rounded-xl overflow-hidden"><CpuChart data={history} color="#6366f1" title={t('card_hashrate') + " (MH/s)"} dataKey="hashrate" unit="M" /></div>
                   <div className="lg:col-span-2 h-full min-h-0 rounded-xl overflow-hidden"><LogTerminal logs={logs} sessions={sessions} activeSessionId={activeSessionId} onSelectSession={setActiveSessionId} onDeleteSession={deleteSession}/></div>
                 </div>
+
                 <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 xl:h-[32rem]">
                     <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 flex flex-col h-full relative overflow-hidden">
                         {activeSessionId && (<div className="absolute inset-0 bg-slate-950/60 z-10 flex items-center justify-center backdrop-blur-[1px]"><div className="bg-slate-900 border border-slate-800 p-4 rounded-xl shadow-2xl text-center"><div className="flex items-center justify-center gap-2 text-indigo-400 mb-2"><Hash size={24} /><span className="font-bold text-lg">{t('target_locked')}</span></div><p className="text-slate-400 text-sm mb-1">{t('target_locked_desc')}</p><div className="font-mono text-white bg-slate-950 px-3 py-1 rounded border border-slate-800 text-xs inline-block mt-2">{session.target || t('target_manual')}</div></div></div>)}
@@ -1054,11 +1680,18 @@ function App() {
                               <div className="bg-slate-950 border border-slate-800 p-4 rounded-lg text-center"><div className="text-xs text-slate-500 uppercase font-bold">{t('modal_cracked')}</div><div className="text-xl font-mono text-emerald-400">{preCrackedResults.found}</div></div>
                               <div className="bg-slate-950 border border-slate-800 p-4 rounded-lg text-center"><div className="text-xs text-slate-500 uppercase font-bold">{t('modal_locked')}</div><div className="text-xl font-mono text-red-400">{preCrackedResults.total - preCrackedResults.found}</div></div>
                           </div>
-                          {preCrackedResults.found > 100 && (<div className="p-2 text-xs text-amber-500 bg-amber-500/10 text-center font-bold border-b border-slate-800 shrink-0">{t('modal_limit_msg', { count: preCrackedResults.found })}</div>)}
                           <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
-                              {preCrackedResults.found === 0 ? (<div className="text-center text-slate-500 py-10 italic">{t('modal_no_matches')}</div>) : (<table className="w-full text-left text-sm"><thead className="text-xs text-slate-500 uppercase bg-slate-900 sticky top-0"><tr><th className="p-2">Hash</th><th className="p-2">Plaintext</th></tr></thead><tbody className="divide-y divide-slate-800">{preCrackedResults.list.slice(0, 100).map((item, idx) => (<tr key={idx} className="hover:bg-slate-800/50"><td className="p-2 font-mono text-slate-400 truncate max-w-[200px]" title={item.hash}>{item.hash}</td><td className="p-2 font-mono text-emerald-300 truncate max-w-[200px]">{item.plain}</td></tr>))}</tbody></table>)}
+                              {preCrackedResults.found === 0 ? (<div className="text-center text-slate-500 py-10 italic">{t('modal_no_matches')}</div>) : (<table className="w-full text-left text-sm"><thead className="text-xs text-slate-500 uppercase bg-slate-900 sticky top-0"><tr><th className="p-2">Hash</th><th className="p-2">Plaintext</th></tr></thead><tbody className="divide-y divide-slate-800">{preCrackedResults.list.map((item, idx) => (<tr key={idx} className="hover:bg-slate-800/50"><td className="p-2 font-mono text-slate-400 truncate max-w-[200px]" title={item.hash}>{item.hash}</td><td className="p-2 font-mono text-emerald-300 truncate max-w-[200px]">{item.plain}</td></tr>))}</tbody></table>)}
                           </div>
-                          <div className="p-4 border-t border-slate-800 bg-slate-950/50 flex justify-end gap-2 shrink-0"><button onClick={() => { if (preCrackedResults && (preCrackedResults as any).downloadToken) window.location.href = `http://localhost:3001/api/download/check-result/${(preCrackedResults as any).downloadToken}`; }} disabled={preCrackedResults.found === 0} className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold transition-colors disabled:opacity-50 flex items-center gap-2"><Download size={14} /> {t('modal_download')}</button><button onClick={() => setShowPreCrackedModal(false)} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition-colors">{t('modal_close')}</button></div>
+                          <div className="p-4 border-t border-slate-800 bg-slate-950/50 flex justify-end gap-2 shrink-0"><button onClick={() => {
+                              if (!preCrackedResults || preCrackedResults.found === 0) return;
+                              const content = preCrackedResults.list.map((h: any) => `${h.hash}:${h.plain}`).join('\n');
+                              setEscrowSubmissionData(content);
+                              setEscrowSubmissionAlgo(config.hashType);
+                              setShowPreCrackedModal(false);
+                              setActiveTab('escrow');
+                              addLog('general', `Prepared ${preCrackedResults.found} potfile cracks for escrow.`, 'INFO');
+                          }} disabled={preCrackedResults.found === 0} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"><Globe size={14} /> Send to Escrow</button><button onClick={() => { if (preCrackedResults && (preCrackedResults as any).downloadToken) window.location.href = `http://localhost:3001/api/download/check-result/${(preCrackedResults as any).downloadToken}`; }} disabled={preCrackedResults.found === 0} className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold transition-colors disabled:opacity-50 flex items-center gap-2"><Download size={14} /> {t('modal_download')}</button><button onClick={() => setShowPreCrackedModal(false)} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition-colors">{t('modal_close')}</button></div>
                       </div>
                   </div>
                 )}
@@ -1081,11 +1714,14 @@ function App() {
             )}
             
             {activeTab === 'config' && (
-                <ConfigPanel 
-                    config={config} 
-                    setConfig={setConfig} 
-                    onStart={(cmd) => { setActiveTab('dashboard'); if (status !== SessionStatus.RUNNING) toggleSession(cmd); }} 
+                <ConfigPanel
+                    config={config}
+                    setConfig={setConfig}
+                    onStart={(cmd) => { setActiveTab('dashboard'); if (status !== SessionStatus.RUNNING) toggleSession(cmd); }}
                     onQueue={handleAddToQueue}
+                    onStartWorkflow={handleStartSmartWorkflow}
+                    onQueueWorkflow={handleQueueSmartWorkflow}
+                    sessionHashrate={session.hashrate}
                 />
             )}
             

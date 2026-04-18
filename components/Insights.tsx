@@ -1,40 +1,62 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { 
-  Microscope, Layers, History, Download, FileDown, FileText, 
-  Loader2, ShieldCheck, ChevronUp, ChevronDown, PlayCircle, 
-  GitBranch, ArrowLeftRight, Database, Clock, Copy, BarChart3, 
+import {
+  Microscope, Layers, History, Download, FileDown, FileText,
+  Loader2, ShieldCheck, ChevronUp, ChevronDown, PlayCircle,
+  GitBranch, ArrowLeftRight, Database, Clock, Copy, BarChart3,
   PieChart, Calculator, X, Sparkles, Info, Zap, Eye, Camera,
   TrendingUp, BarChart2, Cpu, Activity, Timer, AlertTriangle,
   Scale, Trash2, FileCheck, Printer, FileCode, DollarSign,
   Calendar, Hash, Sun, Minus, AlignCenter,
-  LayoutGrid, Disc 
+  LayoutGrid, Disc, Workflow, CheckCircle2, SkipForward, RefreshCw
 } from 'lucide-react';
 import { 
   BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, 
-  Tooltip, ResponsiveContainer, LabelList, ScatterChart, 
-  Scatter, ZAxis, AreaChart, Area, Radar, RadarChart, 
-  PolarGrid, PolarAngleAxis, PolarRadiusAxis, Legend,
+  Tooltip, ResponsiveContainer, LabelList, ScatterChart,
+  Scatter, ZAxis, AreaChart, Area, Legend,
   ComposedChart, Line
 } from 'recharts';
 import { SessionStats, LogEntry, HashcatConfig, RecoveredHash } from '../types';
 import { HASH_TYPES } from '../constants';
 import { useTranslation } from 'react-i18next';
 
+const getSocketUrl = () => {
+    const host = window.location.hostname;
+    if (host.includes('zrok.io') || window.location.port === '3001') {
+        return window.location.origin;
+    }
+    return 'http://localhost:3001';
+};
+
 // --- Types & Interfaces ---
+
+export interface PhaseBreakdownEntry {
+    phase: number;
+    label: string;
+    recovered: number;
+    status: 'pending' | 'running' | 'done' | 'skipped' | 'aborted';
+    learned?: number;
+    masks?: number;
+    hashrateHps?: number;
+    hashrateSource?: string;
+}
 
 export interface PastSession {
     id: string;
     date: Date;
-    duration: number; 
+    duration: number;
     mode: string;
     algorithmId: string;
     attackType: string;
-    attackMode: number; 
+    attackMode: number;
     recovered: number;
     totalHashes: number;
     avgHashrate: number;
-    powerUsage: number; 
-    analysis?: InsightsData; 
+    powerUsage: number;
+    analysis?: InsightsData;
+    phaseBreakdown?: PhaseBreakdownEntry[];
+    maskFileId?: string;       // workflowId — present when smart workflow saved a mask file
+    skippedMasks?: number;     // count of masks skipped due to time budget
+    sessionId?: string;        // hashcat session id — used to rehydrate live widgets for past sessions
 }
 
 interface MaskData {
@@ -484,6 +506,8 @@ const Insights: React.FC<InsightsProps> = ({
     // --- PRINCE STATE ---
     const [showPrinceModal, setShowPrinceModal] = useState(false);
     const [isPrinceRunning, setIsPrinceRunning] = useState(false);
+    const princeFileRef = useRef<File | null>(null);
+    const [princeFileName, setPrinceFileName] = useState('');
     const [princeConfig, setPrinceConfig] = useState<PrinceConfig>({
         source: 'potfile',
         file: null,
@@ -523,13 +547,12 @@ const Insights: React.FC<InsightsProps> = ({
             const avgHashrate = data.totalHashrate / data.count;
             const avgPower = data.totalPower / data.count;
             const efficiency = avgPower > 0 ? avgHashrate / avgPower : 0;
-            const logEfficiency = efficiency > 0 ? Math.log10(efficiency) : 0;
             return {
                 subject: name,
-                A: logEfficiency,
+                A: efficiency,
                 fullValue: efficiency
             };
-        });
+        }).sort((a, b) => b.A - a.A);
     }, [localPastSessions]);
 
     // 2. Cumulative Growth Data (Area Charts for Recovered, Cost, Power)
@@ -539,27 +562,26 @@ const Insights: React.FC<InsightsProps> = ({
         const sorted = [...localPastSessions].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
         
         let runningRecovered = 0;
-        let runningEnergy = 0; // Wh
+        let runningEnergy = 0; // kWh
         let runningCost = 0;
 
         return sorted.map(s => {
             runningRecovered += s.recovered;
-            
-            // Energy Calculation (Wh)
-            // powerUsage is Avg Watts, duration is Seconds
+
+            // Energy Calculation (kWh)
             const hours = s.duration / 3600;
             const wh = s.powerUsage * hours;
-            runningEnergy += wh;
+            const kwh = wh / 1000;
+            runningEnergy += kwh;
 
             // Cost Calculation
-            const kwh = wh / 1000;
             const cost = kwh * electricityRate;
             runningCost += cost;
 
             return {
                 date: new Date(s.date).toLocaleDateString(),
                 recovered: runningRecovered,
-                energy: parseFloat(runningEnergy.toFixed(2)),
+                energy: parseFloat(runningEnergy.toFixed(4)),
                 cost: parseFloat(runningCost.toFixed(2)),
                 sessionRecovered: s.recovered
             };
@@ -735,38 +757,63 @@ const Insights: React.FC<InsightsProps> = ({
     };
 
     const handleGeneratePrince = async () => {
-        if (princeConfig.limit === 0 && (princeConfig.elemMax > 4 || princeConfig.elemMax === 0)) {
+        const selectedFile = princeFileRef.current;
+        if (princeConfig.source === 'upload' && !selectedFile) {
+            addLog('general', 'PRINCE: No file selected for upload.', 'ERROR');
+            return;
+        }
+        if (princeConfig.limit === 0 && princeConfig.elemMax > 4) {
             const confirm = window.confirm("WARNING: You have selected High Elements with NO LIMIT. This will likely crash the server or fill your disk. Are you sure?");
             if (!confirm) return;
         }
 
         setIsPrinceRunning(true);
-        const formData = new FormData();
-        
-        formData.append('source', princeConfig.source);
-        if (princeConfig.source === 'upload' && princeConfig.file) {
-            formData.append('wordlist', princeConfig.file);
-        }
-        
-        if (princeConfig.pwMin > 0) formData.append('pwMin', princeConfig.pwMin.toString());
-        if (princeConfig.pwMax > 0) formData.append('pwMax', princeConfig.pwMax.toString());
-        if (princeConfig.elemMin > 0) formData.append('elemMin', princeConfig.elemMin.toString());
-        if (princeConfig.elemMax > 0) formData.append('elemMax', princeConfig.elemMax.toString());
-        if (princeConfig.limit > 0) formData.append('limit', princeConfig.limit.toString());
-        formData.append('casePermute', princeConfig.casePermute.toString());
-        if (princeConfig.outputName) formData.append('outputName', princeConfig.outputName);
 
         try {
-            const response = await fetch('http://localhost:3001/api/tools/prince', {
+            // Read file as text if upload source, then send everything as JSON
+            let wordlistContent: string | undefined;
+            if (princeConfig.source === 'upload' && selectedFile) {
+                wordlistContent = await new Promise<string>((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => resolve(e.target?.result as string ?? '');
+                    reader.onerror = () => reject(new Error('Failed to read file'));
+                    reader.readAsText(selectedFile);
+                });
+            }
+
+            const payload: Record<string, unknown> = {
+                source: princeConfig.source,
+                casePermute: princeConfig.casePermute,
+            };
+            if (wordlistContent !== undefined) payload.wordlistContent = wordlistContent;
+            if (princeConfig.pwMin > 0) payload.pwMin = princeConfig.pwMin;
+            if (princeConfig.pwMax > 0) payload.pwMax = princeConfig.pwMax;
+            if (princeConfig.elemMin > 0) payload.elemMin = princeConfig.elemMin;
+            if (princeConfig.elemMax > 0) payload.elemMax = princeConfig.elemMax;
+            if (princeConfig.limit > 0) payload.limit = princeConfig.limit;
+            if (princeConfig.outputName) payload.outputName = princeConfig.outputName;
+
+            const response = await fetch(`${getSocketUrl()}/api/tools/prince`, {
                 method: 'POST',
-                body: formData
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
             });
-            
+
             const data = await response.json();
-            
+
             if (data.success) {
                 addLog('general', `PRINCE Generated: ${data.filename}`, 'SUCCESS');
-                window.location.href = `http://localhost:3001${data.downloadUrl}`;
+                // Fetch as blob and trigger download without navigating the window
+                const fileRes = await fetch(`${getSocketUrl()}${data.downloadUrl}`);
+                const blob = await fileRes.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = data.filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
                 setShowPrinceModal(false);
             } else {
                 addLog('general', `PRINCE Failed: ${data.message}`, 'ERROR');
@@ -1048,7 +1095,7 @@ const Insights: React.FC<InsightsProps> = ({
                         <div className="flex items-center gap-2 mb-1">
                              <div className="w-2 h-2 rounded-full bg-amber-500"></div>
                              <span className="text-slate-400">Energy:</span>
-                             <span className="text-white font-mono font-bold">{payload[0].payload.energy} Wh</span>
+                             <span className="text-white font-mono font-bold">{payload[0].payload.energy} kWh</span>
                         </div>
                     )}
                 </div>
@@ -1065,20 +1112,13 @@ const Insights: React.FC<InsightsProps> = ({
         const costPerHash = session.recovered > 0 ? (totalCost / session.recovered) : 0;
         const symbol = getCurrencySymbol(currency);
         
-        // Calculate max value for log scale approximation
-        const maxValue = Math.max(...chartData.map(d => d.value));
-        
-        // Generate CSS Chart Bars HTML
+        // Generate CSS Chart Bars HTML (each metric fills its own bar — labeled with actual value)
         const chartHtml = chartData.map(d => {
-            const logVal = Math.log10(d.value > 0 ? d.value : 1);
-            const logMax = Math.log10(maxValue > 0 ? maxValue : 1);
-            let widthPct = logMax > 0 ? (logVal / logMax) * 100 : 0;
-            if (widthPct < 5) widthPct = 5; 
             return `
             <div class="chart-row">
                 <div class="chart-label">${d.name}</div>
                 <div class="chart-bar-container">
-                    <div class="chart-bar" style="width: ${widthPct}%; background-color: ${d.fill};"></div>
+                    <div class="chart-bar" style="width: 100%; background-color: ${d.fill};"></div>
                     <span class="chart-value">${d.displayValue}</span>
                 </div>
             </div>`;
@@ -1187,7 +1227,7 @@ const Insights: React.FC<InsightsProps> = ({
                 </div>
                 
                 <div class="section">
-                    <h2>Efficiency Analysis (Log Scale)</h2>
+                    <h2>Session Metrics</h2>
                     <div class="chart-container">
                         ${chartHtml}
                     </div>
@@ -1254,30 +1294,37 @@ const Insights: React.FC<InsightsProps> = ({
         const hours = s.duration / 3600;
         const wattHours = s.powerUsage * hours;
         const hashrateMh = s.avgHashrate / 1000000;
-        
-        return [
+
+        const items = [
             {
-                name: 'Hashrate (MH/s)',
-                value: hashrateMh > 0 ? hashrateMh : 0.1, 
+                name: 'Hashrate',
+                value: hashrateMh,
                 displayValue: `${hashrateMh.toFixed(2)} MH/s`,
-                fill: '#6366f1', // Indigo
+                fill: '#6366f1',
                 unit: 'MH/s'
             },
             {
-                name: 'Energy (Wh)',
-                value: wattHours > 0 ? parseFloat(wattHours.toFixed(2)) : 0.1,
-                displayValue: `${wattHours.toFixed(2)} Wh`,
-                fill: '#f59e0b', // Amber
+                name: 'Energy',
+                value: wattHours,
+                displayValue: wattHours >= 1000 ? `${(wattHours/1000).toFixed(3)} kWh` : `${wattHours.toFixed(2)} Wh`,
+                fill: '#f59e0b',
                 unit: 'Wh'
             },
             {
                 name: 'Recovered',
-                value: s.recovered > 0 ? s.recovered : 0.1,
+                value: s.recovered,
                 displayValue: s.recovered.toString(),
-                fill: '#10b981', // Emerald
+                fill: '#10b981',
                 unit: 'Hashes'
             }
         ];
+
+        // Normalize each metric to 0-100 relative to itself (each bar uses its own 100% scale)
+        // so they display proportionally within their own metric range (always full bar)
+        return items.map(item => ({
+            ...item,
+            normalizedValue: item.value > 0 ? 100 : 0,
+        }));
     };
 
     // Helper to extract session specific stats for the header
@@ -1421,7 +1468,7 @@ const Insights: React.FC<InsightsProps> = ({
                             <h3 className="font-bold text-slate-200 flex items-center gap-2">
                                 <Zap size={18} className="text-amber-400" /> PRINCE Wordlist Generator
                             </h3>
-                            <button onClick={() => setShowPrinceModal(false)} className="text-slate-500 hover:text-white transition-colors"><X size={20} /></button>
+                            <button onClick={() => { princeFileRef.current = null; setPrinceFileName(''); setShowPrinceModal(false); }} className="text-slate-500 hover:text-white transition-colors"><X size={20} /></button>
                         </div>
                         <div className="p-6 space-y-5 max-h-[70vh] overflow-y-auto custom-scrollbar">
                             
@@ -1440,8 +1487,8 @@ const Insights: React.FC<InsightsProps> = ({
                             <div className="space-y-2">
                                 <label className="text-xs uppercase font-bold text-slate-500">1. Input Source (Seed)</label>
                                 <div className="grid grid-cols-2 gap-2">
-                                    <button 
-                                        onClick={() => setPrinceConfig({...princeConfig, source: 'potfile'})}
+                                    <button
+                                        onClick={() => { princeFileRef.current = null; setPrinceFileName(''); setPrinceConfig({...princeConfig, source: 'potfile'}); }}
                                         className={`p-3 rounded border text-sm font-medium transition-all ${princeConfig.source === 'potfile' ? 'bg-indigo-600/20 border-indigo-500 text-indigo-300' : 'bg-slate-950 border-slate-800 text-slate-400'}`}
                                     >
                                         Use Potfile ({globalPotfile.length} Words)
@@ -1454,11 +1501,17 @@ const Insights: React.FC<InsightsProps> = ({
                                     </button>
                                 </div>
                                 {princeConfig.source === 'upload' && (
-                                    <input 
-                                        type="file" 
-                                        onChange={(e) => setPrinceConfig({...princeConfig, file: e.target.files?.[0] || null})}
-                                        className="w-full text-xs text-slate-400 bg-slate-950 border border-slate-800 rounded p-2"
-                                    />
+                                    <div className="space-y-1">
+                                        <input
+                                            type="file"
+                                            onChange={(e) => {
+                                                princeFileRef.current = e.target.files?.[0] || null;
+                                                setPrinceFileName(e.target.files?.[0]?.name || '');
+                                            }}
+                                            className="w-full text-xs text-slate-400 bg-slate-950 border border-slate-800 rounded p-2"
+                                        />
+                                        {princeFileName && <div className="text-[10px] text-emerald-400">Selected: {princeFileName}</div>}
+                                    </div>
                                 )}
                             </div>
 
@@ -1537,9 +1590,9 @@ const Insights: React.FC<InsightsProps> = ({
                                 </label>
                             </div>
 
-                            <button 
-                                onClick={handleGeneratePrince} 
-                                disabled={isPrinceRunning}
+                            <button
+                                onClick={handleGeneratePrince}
+                                disabled={isPrinceRunning || (princeConfig.source === 'upload' && !princeFileName)}
                                 className={`w-full font-bold py-3 rounded-lg transition-colors flex items-center justify-center gap-2 mt-2 disabled:opacity-50 ${princeRisk.level === 'DANGER' ? 'bg-red-600 hover:bg-red-500 text-white' : 'bg-amber-600 hover:bg-amber-500 text-white'}`}
                             >
                                 {isPrinceRunning ? <Loader2 className="animate-spin" size={18} /> : <Cpu size={18} />}
@@ -1722,10 +1775,10 @@ const Insights: React.FC<InsightsProps> = ({
                                                 tickFormatter={(val) => `${getCurrencySymbol(currency)}${val}`}
                                             />
                                             
-                                            {/* Hidden Axis: Energy (for scaling) */}
-                                            <YAxis 
-                                                yAxisId="energy" 
-                                                orientation="right" 
+                                            {/* Hidden Axis: Energy kWh (for scaling) */}
+                                            <YAxis
+                                                yAxisId="energy"
+                                                orientation="right"
                                                 hide
                                                 domain={['auto', 'auto']}
                                             />
@@ -1750,15 +1803,15 @@ const Insights: React.FC<InsightsProps> = ({
                                                 dot={false}
                                                 name="Total Cost" 
                                             />
-                                            <Line 
+                                            <Line
                                                 yAxisId="energy"
-                                                type="monotone" 
-                                                dataKey="energy" 
-                                                stroke="#f59e0b" 
-                                                strokeWidth={2} 
+                                                type="monotone"
+                                                dataKey="energy"
+                                                stroke="#f59e0b"
+                                                strokeWidth={2}
                                                 strokeDasharray="4 4"
                                                 dot={false}
-                                                name="Total Energy" 
+                                                name="Total Energy (kWh)"
                                             />
                                         </ComposedChart>
                                     </ResponsiveContainer>
@@ -1807,7 +1860,18 @@ const Insights: React.FC<InsightsProps> = ({
                                                                     <React.Fragment key={s.id}>
                                                                         <tr className={`transition-colors ${expandedSessionId === s.id ? 'bg-indigo-900/20 border-l-2 border-indigo-500' : 'hover:bg-slate-800/30'}`}>
                                                                             <td className="p-2 pl-8 text-slate-400">{new Date(s.date).toLocaleString()}</td>
-                                                                            <td className="p-2 text-indigo-300 font-mono truncate max-w-[150px]" title={s.attackType}>{s.attackType}</td>
+                                                                            <td className="p-2 max-w-[150px]">
+                                                                                <div className="flex items-center gap-1.5 flex-wrap">
+                                                                                    {s.phaseBreakdown ? (
+                                                                                        <span className="flex items-center gap-1 text-indigo-300 font-mono text-xs">
+                                                                                            <Workflow size={11} className="text-indigo-400 shrink-0" />
+                                                                                            Smart Workflow
+                                                                                        </span>
+                                                                                    ) : (
+                                                                                        <span className="text-indigo-300 font-mono text-xs truncate" title={s.attackType}>{s.attackType}</span>
+                                                                                    )}
+                                                                                </div>
+                                                                            </td>
                                                                             <td className="p-2 text-right font-mono text-slate-400">{(s.avgHashrate / 1000000).toFixed(2)} MH/s</td>
                                                                             <td className="p-2 text-right font-mono text-amber-500 flex items-center justify-end gap-1">
                                                                                 {formatEnergy(s.powerUsage, s.duration)} <Zap size={10} />
@@ -1815,7 +1879,22 @@ const Insights: React.FC<InsightsProps> = ({
                                                                             <td className="p-2 text-right font-mono text-emerald-400">
                                                                                 {getCurrencySymbol(currency)}{sessionCost.toFixed(2)}
                                                                             </td>
-                                                                            <td className="p-2 text-right text-emerald-400 font-bold">{s.recovered} / {s.totalHashes}</td>
+                                                                            <td className="p-2 text-right">
+                                                                                <div className="text-emerald-400 font-bold">{s.recovered} / {s.totalHashes}</div>
+                                                                                {s.phaseBreakdown && s.phaseBreakdown.some(p => p.recovered > 0) && (
+                                                                                    <div className="flex items-center justify-end gap-1 mt-0.5 flex-wrap">
+                                                                                        {s.phaseBreakdown.filter(p => p.recovered > 0).map(p => {
+                                                                                            const dotColors = ['bg-blue-500', 'bg-violet-500', 'bg-amber-500', 'bg-emerald-500'];
+                                                                                            return (
+                                                                                                <span key={p.phase} className="flex items-center gap-0.5 text-[9px] text-slate-500" title={`P${p.phase}: ${p.label}`}>
+                                                                                                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColors[p.phase - 1]}`} />
+                                                                                                    {p.recovered}
+                                                                                                </span>
+                                                                                            );
+                                                                                        })}
+                                                                                    </div>
+                                                                                )}
+                                                                            </td>
                                                                             <td className="p-2 text-right text-slate-400"><Clock size={10} className="inline mr-1" />{formatTime(s.duration)}</td>
                                                                             <td className="p-2 text-center flex items-center justify-center gap-1">
                                                                                 <button 
@@ -1860,9 +1939,9 @@ const Insights: React.FC<InsightsProps> = ({
                                                                         {expandedSessionId === s.id && (
                                                                             <tr ref={activeGraphRef} className="bg-slate-900/80 border-b border-slate-800/50 animate-in fade-in slide-in-from-top-2 duration-200">
                                                                                 <td colSpan={8} className="p-4">
-                                                                                    <div className="flex flex-col md:flex-row gap-4 h-[260px]">
+                                                                                    <div className={`flex flex-col md:flex-row gap-4 ${s.phaseBreakdown ? '' : 'h-[260px]'}`}>
                                                                                         {/* Metadata Sidebar */}
-                                                                                        <div className="md:w-1/3 flex flex-col gap-2 h-full">
+                                                                                        <div className={`${s.phaseBreakdown ? 'md:w-1/3' : 'md:w-1/3 h-full'} flex flex-col gap-2`}>
                                                                                             <div className="bg-slate-950/50 p-3 rounded border border-slate-800/50 flex items-center justify-between flex-1">
                                                                                                 <div className="flex items-center gap-2 text-slate-500">
                                                                                                     <Cpu size={14} /> <span className="text-xs uppercase font-bold">Algorithm</span>
@@ -1896,29 +1975,29 @@ const Insights: React.FC<InsightsProps> = ({
                                                                                             </div>
                                                                                         </div>
                                                                                         
-                                                                                        {/* Log Chart Container */}
-                                                                                        <div className="md:w-2/3 h-full relative bg-slate-950/50 rounded border border-slate-800/50 p-2">
+                                                                                        {/* Session Metrics Chart */}
+                                                                                        <div className={`md:w-2/3 ${s.phaseBreakdown ? 'h-[260px]' : 'h-full'} relative bg-slate-950/50 rounded border border-slate-800/50 p-2`}>
                                                                                             <div className="absolute top-2 left-3 text-xs font-bold text-slate-500 flex items-center gap-1 z-10">
-                                                                                                <BarChart2 size={12}/> Magnitude Comparison (Log Scale)
+                                                                                                <BarChart2 size={12}/> Session Metrics
                                                                                             </div>
                                                                                             <ResponsiveContainer width="100%" height="100%">
-                                                                                                <BarChart 
-                                                                                                    layout="vertical" 
-                                                                                                    data={getSessionChartData(s)} 
-                                                                                                    margin={{ top: 30, right: 120, bottom: 20, left: 20 }}
+                                                                                                <BarChart
+                                                                                                    layout="vertical"
+                                                                                                    data={getSessionChartData(s)}
+                                                                                                    margin={{ top: 30, right: 130, bottom: 20, left: 20 }}
                                                                                                 >
                                                                                                     <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" horizontal={false} />
-                                                                                                    <XAxis type="number" scale="log" domain={['dataMin', 'auto']} hide />
-                                                                                                    <YAxis 
-                                                                                                        type="category" 
-                                                                                                        dataKey="name" 
-                                                                                                        width={100} 
-                                                                                                        tick={{ fill: '#94a3b8', fontSize: 11, fontWeight: 'bold' }} 
-                                                                                                        tickLine={false} 
+                                                                                                    <XAxis type="number" hide />
+                                                                                                    <YAxis
+                                                                                                        type="category"
+                                                                                                        dataKey="name"
+                                                                                                        width={100}
+                                                                                                        tick={{ fill: '#94a3b8', fontSize: 11, fontWeight: 'bold' }}
+                                                                                                        tickLine={false}
                                                                                                         axisLine={false}
                                                                                                     />
                                                                                                     <Tooltip cursor={{ fill: '#334155', opacity: 0.1 }} content={<CustomTooltip />} />
-                                                                                                    <Bar dataKey="value" barSize={24} radius={[0, 4, 4, 0]}>
+                                                                                                    <Bar dataKey="normalizedValue" barSize={24} radius={[0, 4, 4, 0]}>
                                                                                                         {getSessionChartData(s).map((entry, index) => (
                                                                                                             <Cell key={`cell-${index}`} fill={entry.fill} />
                                                                                                         ))}
@@ -1928,6 +2007,113 @@ const Insights: React.FC<InsightsProps> = ({
                                                                                             </ResponsiveContainer>
                                                                                         </div>
                                                                                     </div>
+
+                                                                                    {/* Smart Workflow Phase Breakdown */}
+                                                                                    {s.phaseBreakdown && s.phaseBreakdown.length > 0 && (() => {
+                                                                                        const phaseIcons = [PlayCircle, Zap, SkipForward, RefreshCw];
+                                                                                        const totalPhaseRecovered = s.phaseBreakdown.reduce((sum, p) => sum + (p.recovered || 0), 0);
+                                                                                        return (
+                                                                                            <div className="mt-4 bg-indigo-950/20 border border-indigo-900/40 rounded-lg p-3">
+                                                                                                <div className="flex items-center gap-2 mb-3">
+                                                                                                    <Workflow size={13} className="text-indigo-400" />
+                                                                                                    <span className="text-xs font-bold text-indigo-300 uppercase tracking-wide">Smart Workflow Phase Breakdown</span>
+                                                                                                    <span className="ml-auto text-[10px] text-emerald-400 font-bold bg-emerald-400/10 px-2 py-0.5 rounded-full">
+                                                                                                        {totalPhaseRecovered} total recovered
+                                                                                                    </span>
+                                                                                                </div>
+                                                                                                <div className="grid grid-cols-4 gap-2">
+                                                                                                    {s.phaseBreakdown.map(p => {
+                                                                                                        const Icon = phaseIcons[p.phase - 1] || PlayCircle;
+                                                                                                        const isDone = p.status === 'done';
+                                                                                                        const isSkipped = p.status === 'skipped';
+                                                                                                        return (
+                                                                                                            <div
+                                                                                                                key={p.phase}
+                                                                                                                className={`rounded-lg p-2.5 border ${
+                                                                                                                    isDone ? 'bg-emerald-950/30 border-emerald-800/40' :
+                                                                                                                    isSkipped ? 'bg-slate-900/50 border-slate-800/40' :
+                                                                                                                    'bg-slate-950/40 border-slate-800/30'
+                                                                                                                }`}
+                                                                                                            >
+                                                                                                                <div className="flex items-center justify-between mb-1.5">
+                                                                                                                    <div className="flex items-center gap-1">
+                                                                                                                        <span className={`text-[9px] font-bold uppercase ${isDone ? 'text-emerald-500' : isSkipped ? 'text-slate-600' : 'text-slate-500'}`}>P{p.phase}</span>
+                                                                                                                    </div>
+                                                                                                                    {isDone && <CheckCircle2 size={11} className="text-emerald-400" />}
+                                                                                                                    {isSkipped && <span className="text-[8px] text-slate-600 font-bold">SKIP</span>}
+                                                                                                                    {!isDone && !isSkipped && <Icon size={11} className="text-slate-600" />}
+                                                                                                                </div>
+                                                                                                                <div className={`text-[10px] font-semibold leading-tight mb-1 ${isDone ? 'text-slate-300' : 'text-slate-600'}`}>
+                                                                                                                    {p.label}
+                                                                                                                </div>
+                                                                                                                {p.recovered > 0 ? (
+                                                                                                                    <div className="text-[11px] text-emerald-400 font-bold">+{p.recovered} recovered</div>
+                                                                                                                ) : isDone && !isSkipped ? (
+                                                                                                                    <div className="text-[10px] text-slate-600">0 recovered</div>
+                                                                                                                ) : null}
+                                                                                                                {p.learned !== undefined && (
+                                                                                                                    <div className="text-[9px] text-indigo-400 mt-0.5">{p.learned} learned · {p.masks} masks</div>
+                                                                                                                )}
+                                                                                                            </div>
+                                                                                                        );
+                                                                                                    })}
+                                                                                                </div>
+                                                                                                {/* Recovery distribution bar */}
+                                                                                                {totalPhaseRecovered > 0 && (
+                                                                                                    <div className="mt-3">
+                                                                                                        <div className="text-[9px] text-slate-600 uppercase font-bold mb-1">Recovery Distribution</div>
+                                                                                                        <div className="flex h-2 rounded-full overflow-hidden gap-px bg-slate-900">
+                                                                                                            {s.phaseBreakdown.filter(p => p.recovered > 0).map((p, idx) => {
+                                                                                                                const pct = (p.recovered / totalPhaseRecovered) * 100;
+                                                                                                                const colors = ['bg-blue-500', 'bg-violet-500', 'bg-amber-500', 'bg-emerald-500'];
+                                                                                                                return (
+                                                                                                                    <div
+                                                                                                                        key={p.phase}
+                                                                                                                        className={`${colors[p.phase - 1] || colors[idx % colors.length]} transition-all`}
+                                                                                                                        style={{ width: `${pct}%` }}
+                                                                                                                        title={`P${p.phase} ${p.label}: ${p.recovered} (${pct.toFixed(1)}%)`}
+                                                                                                                    />
+                                                                                                                );
+                                                                                                            })}
+                                                                                                        </div>
+                                                                                                        <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1.5">
+                                                                                                            {s.phaseBreakdown.filter(p => p.recovered > 0).map(p => {
+                                                                                                                const pct = ((p.recovered / totalPhaseRecovered) * 100).toFixed(1);
+                                                                                                                const dotColors = ['bg-blue-500', 'bg-violet-500', 'bg-amber-500', 'bg-emerald-500'];
+                                                                                                                return (
+                                                                                                                    <span key={p.phase} className="flex items-center gap-1 text-[9px] text-slate-500">
+                                                                                                                        <span className={`w-1.5 h-1.5 rounded-full ${dotColors[p.phase - 1]}`} />
+                                                                                                                        P{p.phase} {pct}%
+                                                                                                                    </span>
+                                                                                                                );
+                                                                                                            })}
+                                                                                                        </div>
+                                                                                                    </div>
+                                                                                                )}
+                                                                                                {/* Mask file download */}
+                                                                                                {s.maskFileId && (
+                                                                                                    <div className="mt-3 pt-3 border-t border-indigo-900/30 flex items-center justify-between gap-2">
+                                                                                                        <div className="flex items-center gap-1.5">
+                                                                                                            <Hash size={11} className="text-amber-400 shrink-0" />
+                                                                                                            <span className="text-[10px] text-slate-400">
+                                                                                                                {s.skippedMasks && s.skippedMasks > 0
+                                                                                                                    ? <><span className="text-amber-400 font-bold">{s.skippedMasks} masks</span> exceeded time budget — not run</>
+                                                                                                                    : 'Full mask file available for this session'}
+                                                                                                            </span>
+                                                                                                        </div>
+                                                                                                        <a
+                                                                                                            href={`${getSocketUrl()}/api/smart-workflow/masks/${s.maskFileId}`}
+                                                                                                            download={`masks_${s.maskFileId}.hcmask`}
+                                                                                                            className="flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 transition-colors shrink-0"
+                                                                                                            title="Download all extracted masks as .hcmask — includes masks skipped due to time budget"
+                                                                                                        >
+                                                                                                            <Download size={10} /> Download Masks
+                                                                                                        </a>
+                                                                                                    </div>
+                                                                                                )}
+                                                                                            </div>
+                                                                                        );
+                                                                                    })()}
                                                                                 </td>
                                                                             </tr>
                                                                         )}
@@ -2070,36 +2256,63 @@ const Insights: React.FC<InsightsProps> = ({
                             <div className="space-y-4">{Object.entries(insights.charsets || {}).map(([label, count]) => { const pct = insights.total > 0 ? (count / insights.total) * 100 : 0; if (count === 0) return null; return (<div key={label}><div className="flex justify-between text-xs mb-1.5"><span className="text-slate-400">{label}</span><span className="text-slate-200 font-mono">{pct.toFixed(1)}%</span></div><div className="h-2 bg-slate-800 rounded-full overflow-hidden"><div className="h-full bg-purple-500" style={{ width: `${pct}%` }}></div></div></div>); })}</div>
                         </div>
 
-                        {/* CHART #5: ALGORITHM EFFICIENCY RADAR (MOVED HERE) */}
-                        {algorithmRadarData.length > 2 && (
-                            <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 flex flex-col items-center">
-                                <div className="flex items-center gap-2 mb-4 w-full">
+                        {/* CHART #5: ALGORITHM EFFICIENCY BAR CHART */}
+                        {algorithmRadarData.length > 1 && (
+                            <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+                                <div className="flex items-center gap-2 mb-4">
                                     <Activity size={18} className="text-rose-400"/>
                                     <h3 className="font-bold text-slate-200">Algorithm Efficiency Comparison</h3>
                                 </div>
-                                <div className="h-64 w-full max-w-md">
+                                {/* Fixed-height scrollable container — inner div grows with data */}
+                                <div className="h-64 overflow-y-auto custom-scrollbar">
+                                <div style={{ height: Math.max(200, algorithmRadarData.length * 44) }} className="w-full">
                                     <ResponsiveContainer width="100%" height="100%">
-                                        <RadarChart cx="50%" cy="50%" outerRadius="65%" data={algorithmRadarData} margin={{ top: 20, right: 30, bottom: 20, left: 30 }}>
-                                            <PolarGrid stroke="#334155" />
-                                            <PolarAngleAxis dataKey="subject" tick={{ fill: '#94a3b8', fontSize: 10 }} />
-                                            <PolarRadiusAxis angle={30} domain={[0, 'auto']} tick={false} axisLine={false} />
-                                            <Radar name="Efficiency (Log Scale)" dataKey="A" stroke="#f43f5e" fill="#f43f5e" fillOpacity={0.6} />
+                                        <BarChart
+                                            data={algorithmRadarData}
+                                            layout="vertical"
+                                            margin={{ top: 4, right: 110, bottom: 4, left: 8 }}
+                                            barCategoryGap="30%"
+                                        >
+                                            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" horizontal={false} />
+                                            <XAxis type="number" hide />
+                                            <YAxis
+                                                type="category"
+                                                dataKey="subject"
+                                                width={145}
+                                                tick={{ fill: '#94a3b8', fontSize: 10 }}
+                                                tickLine={false}
+                                                axisLine={false}
+                                                tickFormatter={(v: string) => v.length > 22 ? v.substring(0, 20) + '…' : v}
+                                            />
                                             <Tooltip content={({ active, payload }) => {
                                                 if (active && payload && payload.length) {
                                                     const d = payload[0].payload;
+                                                    const v = d.fullValue;
+                                                    const fmt = v >= 1e9 ? `${(v/1e9).toFixed(2)} GH/W` : v >= 1e6 ? `${(v/1e6).toFixed(2)} MH/W` : v >= 1e3 ? `${(v/1e3).toFixed(2)} KH/W` : `${v.toFixed(0)} H/W`;
                                                     return (
                                                         <div className="bg-slate-900 border border-slate-700 p-2 rounded shadow-xl text-xs">
                                                             <div className="font-bold text-rose-400 mb-1">{d.subject}</div>
-                                                            <div className="text-slate-300">Hashes/Watt: {d.fullValue.toFixed(0)}</div>
+                                                            <div className="text-slate-300">Efficiency: <span className="text-white font-mono font-bold">{fmt}</span></div>
                                                         </div>
                                                     );
                                                 }
                                                 return null;
                                             }} />
-                                        </RadarChart>
+                                            <Bar dataKey="A" barSize={18} radius={[0, 4, 4, 0]} fill="#f43f5e">
+                                                <LabelList
+                                                    dataKey="A"
+                                                    position="right"
+                                                    fill="#cbd5e1"
+                                                    fontSize={11}
+                                                    fontWeight="bold"
+                                                    formatter={(v: number) => v >= 1e9 ? `${(v/1e9).toFixed(1)}G H/W` : v >= 1e6 ? `${(v/1e6).toFixed(1)}M H/W` : v >= 1e3 ? `${(v/1e3).toFixed(1)}K H/W` : `${v.toFixed(0)} H/W`}
+                                                />
+                                            </Bar>
+                                        </BarChart>
                                     </ResponsiveContainer>
                                 </div>
-                                <div className="text-[10px] text-slate-500 mt-2 text-center">Comparing Hashes per Watt (Log Scale) across different algorithms</div>
+                                </div>
+                                <div className="text-[10px] text-slate-500 mt-2 text-center">Average Hashes per Watt — higher is more efficient · hover a bar for details</div>
                             </div>
                         )}
 

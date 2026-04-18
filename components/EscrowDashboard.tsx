@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { EscrowJob, EscrowAlgo, SessionStats } from '../types';
-import { RefreshCw, Download, Search, UploadCloud, AlertTriangle, DollarSign, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Calendar, FileText, Filter, X, Loader2, Settings, Zap, Save, BrainCircuit, TrendingUp, BarChart3, Globe } from 'lucide-react';
+import { RefreshCw, Download, Search, UploadCloud, AlertTriangle, DollarSign, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Calendar, FileText, Filter, X, Loader2, Settings, Zap, Save, BrainCircuit, TrendingUp, BarChart3, Globe, PieChart } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 // --- Types ---
@@ -97,6 +97,7 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
 
   // History & Analytics
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [uploadDistribution, setUploadDistribution] = useState<{ name: string, count: number }[]>([]);
   const [showAnalytics, setShowAnalytics] = useState(false);
   const [hoveredChartPoint, setHoveredChartPoint] = useState<HistoryItem | null>(null);
 
@@ -213,6 +214,7 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
         const data = await res.json();
         if (data.success && Array.isArray(data.list)) {
             const aggMap = new Map<string, HistoryItem>();
+            const algoDistMap = new Map<string, number>();
             
             data.list.forEach((item: any) => {
                 const dateKey = item.date.split(' ')[0]; 
@@ -245,6 +247,12 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
                 entry.raw.btc += btc;
                 entry.raw.xmr += xmr;
                 entry.raw.ltc += ltc;
+
+                // Track submitted hash type distribution
+                const algoName = item.algorithmName || item.algorithm || item.algo || 'Unknown';
+                if (valid > 0) {
+                    algoDistMap.set(algoName, (algoDistMap.get(algoName) || 0) + valid);
+                }
             });
 
             const sortedHistory = Array.from(aggMap.values()).sort((a, b) => 
@@ -252,6 +260,19 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
             );
 
             setHistory(sortedHistory);
+
+            // Build upload distribution for pie chart
+            const distArray = Array.from(algoDistMap.entries())
+                .map(([name, count]) => ({ name, count }))
+                .sort((a, b) => b.count - a.count);
+            
+            if (distArray.length > 8) {
+                const top7 = distArray.slice(0, 7);
+                const otherCount = distArray.slice(7).reduce((sum, d) => sum + d.count, 0);
+                setUploadDistribution([...top7, { name: 'Other', count: otherCount }]);
+            } else {
+                setUploadDistribution(distArray);
+            }
         }
     } catch (e) {
         console.error("History fetch error:", e);
@@ -420,6 +441,92 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
         const meetsPrice = dlMinPrice ? parseFloat(j.pricePerHashUsd) >= parseFloat(dlMinPrice) : true;
         return meetsAlgo && meetsPrice && j.leftList;
     }).length;
+  };
+
+  // --- PIE CHART DATA (Submitted Hash Type Distribution from Uploads) ---
+  const PIE_COLORS = ['#10b981', '#6366f1', '#f59e0b', '#ef4444', '#8b5cf6', '#14b8a6', '#f97316', '#ec4899', '#06b6d4', '#84cc16', '#a855f7', '#e11d48'];
+
+  const renderPieChart = () => {
+    if (uploadDistribution.length === 0) return (
+      <div className="h-64 flex flex-col items-center justify-center text-slate-500 border border-dashed border-slate-700 rounded-lg bg-slate-950/30">
+        <PieChart className="mb-2 opacity-50" size={32} />
+        <span>No submitted hash data available.</span>
+      </div>
+    );
+
+    const total = uploadDistribution.reduce((s, d) => s + d.count, 0);
+    const size = 200;
+    const cx = size / 2;
+    const cy = size / 2;
+    const radius = 80;
+    const innerRadius = 45;
+
+    // Build arcs
+    let cumulativeAngle = -Math.PI / 2; // start at top
+    const arcs = uploadDistribution.map((item, i) => {
+      const sliceAngle = (item.count / total) * 2 * Math.PI;
+      const startAngle = cumulativeAngle;
+      const endAngle = cumulativeAngle + sliceAngle;
+      cumulativeAngle = endAngle;
+
+      const x1 = cx + radius * Math.cos(startAngle);
+      const y1 = cy + radius * Math.sin(startAngle);
+      const x2 = cx + radius * Math.cos(endAngle);
+      const y2 = cy + radius * Math.sin(endAngle);
+      const ix1 = cx + innerRadius * Math.cos(startAngle);
+      const iy1 = cy + innerRadius * Math.sin(startAngle);
+      const ix2 = cx + innerRadius * Math.cos(endAngle);
+      const iy2 = cy + innerRadius * Math.sin(endAngle);
+
+      const largeArc = sliceAngle > Math.PI ? 1 : 0;
+
+      const d = [
+        `M ${ix1} ${iy1}`,
+        `L ${x1} ${y1}`,
+        `A ${radius} ${radius} 0 ${largeArc} 1 ${x2} ${y2}`,
+        `L ${ix2} ${iy2}`,
+        `A ${innerRadius} ${innerRadius} 0 ${largeArc} 0 ${ix1} ${iy1}`,
+        'Z'
+      ].join(' ');
+
+      return { d, color: PIE_COLORS[i % PIE_COLORS.length], item, percentage: ((item.count / total) * 100) };
+    });
+
+    return (
+      <div className="flex flex-col lg:flex-row items-center gap-6">
+        {/* SVG Donut */}
+        <div className="relative shrink-0">
+          <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+            {arcs.map((arc, i) => (
+              <path
+                key={i}
+                d={arc.d}
+                fill={arc.color}
+                stroke="#0f172a"
+                strokeWidth="2"
+                className="transition-opacity duration-200 hover:opacity-80 cursor-pointer"
+              >
+                <title>{arc.item.name}: {arc.item.count.toLocaleString()} ({arc.percentage.toFixed(1)}%)</title>
+              </path>
+            ))}
+            {/* Center Label */}
+            <text x={cx} y={cy - 6} textAnchor="middle" className="fill-slate-400 text-[10px] font-mono">Total</text>
+            <text x={cx} y={cy + 10} textAnchor="middle" className="fill-white text-[13px] font-bold font-mono">{total.toLocaleString()}</text>
+          </svg>
+        </div>
+
+        {/* Legend */}
+        <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs w-full">
+          {arcs.map((arc, i) => (
+            <div key={i} className="flex items-center gap-2 min-w-0">
+              <div className="w-3 h-3 rounded-sm shrink-0" style={{ backgroundColor: arc.color }} />
+              <span className="text-slate-300 truncate">{arc.item.name}</span>
+              <span className="text-slate-500 font-mono ml-auto shrink-0">{arc.percentage.toFixed(1)}%</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
   };
 
   // --- CHART RENDERING (SMART BAR CHART) ---
@@ -677,6 +784,22 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
                                 {activeCurrency.symbol}{convertedHistory.reduce((a, b) => a + b.convertedValue, 0).toFixed(2)}
                                 <span className="text-sm font-normal text-slate-500">{activeCurrency.code} Lifetime</span>
                              </h2>
+                             {/* Daily Earning Rate */}
+                             {history.length >= 2 && (() => {
+                               const firstDate = new Date(history[0].date);
+                               const lastDate = new Date(history[history.length - 1].date);
+                               const daysDiff = Math.max(1, Math.round((lastDate.getTime() - firstDate.getTime()) / (1000 * 60 * 60 * 24)));
+                               const totalConverted = convertedHistory.reduce((a, b) => a + b.convertedValue, 0);
+                               const dailyRate = totalConverted / daysDiff;
+                               return (
+                                 <div className="flex items-center gap-3 mt-1">
+                                   <span className="text-sm text-emerald-400 font-mono font-semibold">
+                                     {activeCurrency.symbol}{dailyRate.toFixed(4)}<span className="text-slate-500 font-normal text-xs"> / day avg</span>
+                                   </span>
+                                   <span className="text-xs text-slate-600 font-mono">({daysDiff} days)</span>
+                                 </div>
+                               );
+                             })()}
                          </div>
                          <div className="text-right text-xs text-slate-500">
                              <p>Records: {history.length}</p>
@@ -684,6 +807,20 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
                          </div>
                       </div>
                       {renderChart()}
+
+                      {/* Hash Type Distribution Pie Chart */}
+                      {uploadDistribution.length > 0 && (
+                        <div className="mt-6 pt-6 border-t border-slate-800">
+                          <div className="flex items-center gap-2 mb-4">
+                            <PieChart size={16} className="text-indigo-400" />
+                            <h4 className="text-sm font-bold text-slate-200">Submitted Hash Distribution</h4>
+                            <span className="text-xs bg-slate-800 text-slate-400 px-2 py-0.5 rounded-full border border-slate-700 font-mono">
+                              {uploadDistribution.length} types
+                            </span>
+                          </div>
+                          {renderPieChart()}
+                        </div>
+                      )}
                   </div>
               )}
           </div>
@@ -736,6 +873,17 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
                         />
                     </div>
 
+                    {/* Session-End Flush Info */}
+                    <div className="bg-emerald-950/30 p-3 rounded-lg border border-emerald-800/40 flex gap-3 items-start">
+                        <Zap className="text-emerald-400 shrink-0 mt-0.5" size={18} />
+                        <div>
+                            <h4 className="text-xs font-bold text-emerald-300 uppercase mb-1">Session-End Flush</h4>
+                            <p className="text-[11px] text-slate-400 leading-relaxed">
+                                When a session ends, any remaining unsent hashes will be automatically uploaded even if below the threshold. No hashes get left behind.
+                            </p>
+                        </div>
+                    </div>
+
                     <div className="bg-slate-800 p-3 rounded-lg border border-slate-700 flex gap-3 items-start">
                         <BrainCircuit className="text-indigo-400 shrink-0 mt-0.5" size={18} />
                         <div>
@@ -744,6 +892,10 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
                                 Reactor will automatically match the hash type of each running session (e.g., MD5, SHA256) to the correct Hashes.com algorithm ID. This allows you to run concurrent sessions with different hash types seamlessly.
                             </p>
                         </div>
+                    </div>
+
+                    <div className="bg-slate-800/50 p-3 rounded border border-slate-700 text-[11px] text-slate-400 leading-relaxed">
+                      <span className="text-slate-300 font-bold">Note:</span> Session-end flush activity is logged in the session terminal under <code className="text-emerald-400">[SESSION-END FLUSH]</code> entries.
                     </div>
 
                     <button 

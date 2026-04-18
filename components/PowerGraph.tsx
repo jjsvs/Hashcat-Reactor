@@ -16,7 +16,7 @@ interface GPUStat {
     temp: number;
 }
 
-const PowerGraph: React.FC<PowerGraphProps> = ({ socket, compact = false }) => {
+const PowerGraph = React.memo<PowerGraphProps>(({ socket, compact = false }) => {
   const { t } = useTranslation();
   const [data, setData] = useState<{ time: string; watts: number }[]>([]);
   const [details, setDetails] = useState<{ totalWatts: number; maxTemp: number; gpus: GPUStat[] } | null>(null);
@@ -161,6 +161,6 @@ const PowerGraph: React.FC<PowerGraphProps> = ({ socket, compact = false }) => {
       </div>
     </div>
   );
-};
+});
 
 export default PowerGraph;

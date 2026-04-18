@@ -18,7 +18,7 @@ interface CpuChartProps {
   unit?: string;
 }
 
-const CpuChart: React.FC<CpuChartProps> = ({ data, color, title, dataKey, unit = '' }) => {
+const CpuChart = React.memo<CpuChartProps>(({ data, color, title, dataKey, unit = '' }) => {
   return (
     <div className="w-full h-full min-h-[16rem] bg-slate-900/50 border border-slate-800 rounded-xl p-4 flex flex-col">
       <h3 className="text-slate-400 text-sm font-medium mb-4 uppercase tracking-wider">{title}</h3>
@@ -65,6 +65,6 @@ const CpuChart: React.FC<CpuChartProps> = ({ data, color, title, dataKey, unit =
       </div>
     </div>
   );
-};
+});
 
 export default CpuChart;

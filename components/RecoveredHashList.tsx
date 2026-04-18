@@ -9,7 +9,7 @@ interface Props {
   onSendToEscrow?: (hashes: RecoveredHash[]) => void;
 }
 
-const RecoveredHashList: React.FC<Props> = ({ hashes, onSendToEscrow }) => {
+const RecoveredHashList = React.memo<Props>(({ hashes, onSendToEscrow }) => {
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -114,6 +114,6 @@ const RecoveredHashList: React.FC<Props> = ({ hashes, onSendToEscrow }) => {
       </div>
     </div>
   );
-};
+});
 
 export default RecoveredHashList;

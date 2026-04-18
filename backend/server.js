@@ -400,7 +400,7 @@ app.get('/api/escrow/proxy', (req, res) => {
 
 // --- POST PROXY ---
 app.post('/api/escrow/proxy', (req, res) => {
-   
+
     if (req.headers['content-type'] && req.headers['content-type'].includes('application/json')) {
         const { key, algo, fileContent } = req.body;
         
@@ -410,6 +410,7 @@ app.post('/api/escrow/proxy', (req, res) => {
 
         const boundary = '----ReactBoundary' + Math.random().toString(36).slice(2);
         
+        // Manually construct multipart body matching hashes.py: key, algo, userfile
         let payload = '';
         payload += `--${boundary}\r\nContent-Disposition: form-data; name="key"\r\n\r\n${key}\r\n`;
         payload += `--${boundary}\r\nContent-Disposition: form-data; name="algo"\r\n\r\n${algo}\r\n`;
@@ -452,6 +453,7 @@ app.post('/api/escrow/proxy', (req, res) => {
         return;
     }
 
+    // FALLBACK METHOD: Standard buffering for direct File/Blob uploads
     const chunks = [];
     req.on('data', chunk => chunks.push(chunk));
     req.on('end', () => {
@@ -488,14 +490,14 @@ app.post('/api/escrow/proxy', (req, res) => {
     });
 });
 
-app.post('/api/tools/prince', upload.single('wordlist'), (req, res) => {
-    const { source, pwMin, pwMax, elemMin, elemMax, limit, casePermute, outputName } = req.body;
+app.post('/api/tools/prince', (req, res) => {
+    const { source, pwMin, pwMax, elemMin, elemMax, limit, casePermute, outputName, wordlistContent } = req.body;
     const princeBin = getPrincePath();
     if (!fs.existsSync(princeBin)) return res.status(500).json({ message: 'PRINCE binary not found on server.' });
 
     const jobUuid = uuid();
-    const finalOutputName = outputName ? 
-        (outputName.endsWith('.txt') ? outputName : `${outputName}.txt`) : 
+    const finalOutputName = outputName ?
+        (outputName.endsWith('.txt') ? outputName : `${outputName}.txt`) :
         `prince_${jobUuid}.txt`;
     const outputPath = path.join(uploadDir, finalOutputName);
 
@@ -503,8 +505,12 @@ app.post('/api/tools/prince', upload.single('wordlist'), (req, res) => {
     let tempInputCreated = false;
 
     try {
-        if (source === 'upload' && req.file) {
-            inputPath = req.file.path;
+        if (source === 'upload' && wordlistContent) {
+            inputPath = path.join(uploadDir, `prince_in_${jobUuid}.txt`);
+            fs.writeFileSync(inputPath, wordlistContent, 'utf-8');
+            tempInputCreated = true;
+        } else if (source === 'upload' && !wordlistContent) {
+            return res.status(400).json({ message: 'No wordlist content received. Please select a file and try again.' });
         } else if (source === 'potfile' || source === 'session') {
             const sourcePot = source === 'potfile' ? POTFILE_PATH : path.join(uploadDir, 'reactor.potfile');
             if (!fs.existsSync(sourcePot)) return res.status(400).json({ message: 'Selected potfile source is empty or missing.' });
@@ -529,7 +535,7 @@ app.post('/api/tools/prince', upload.single('wordlist'), (req, res) => {
         if (elemMin) args.push(`--elem-cnt-min=${elemMin}`);
         if (elemMax) args.push(`--elem-cnt-max=${elemMax}`);
         if (limit) args.push(`--limit=${limit}`);
-        if (casePermute === 'true') args.push('--case-permute');
+        if (casePermute === true || casePermute === 'true') args.push('--case-permute');
         
         args.push('-o', outputPath);
         args.push(inputPath);
@@ -699,7 +705,7 @@ app.post('/api/session/start', (req, res) => {
   
   let args = [];
   if (restore) {
-    args.push('--restore', '--status', '--status-timer', (config.statusTimer || 30).toString());
+    args.push('--restore', '--status', '--status-timer', (config.statusTimer || 3).toString());
     args.push('--potfile-path', sessionPotFile);
     args.push('--session', sessionId); 
     if (config.hwmonDisable) args.push('--hwmon-disable');
@@ -714,7 +720,7 @@ app.post('/api/session/start', (req, res) => {
     args.push('-m', config.hashType, '-a', config.attackMode.toString(), '-w', config.workloadProfile.toString());
     if (config.devices) args.push('-d', config.devices);
     args.push('--potfile-path', sessionPotFile);
-    args.push('--status', '--status-timer', (config.statusTimer || 30).toString());
+    args.push('--status', '--status-timer', (config.statusTimer || 3).toString());
     args.push('--session', sessionId);
     if (config.optimizedKernel) args.push('-O');
     if (config.remove) args.push('--remove');
@@ -805,7 +811,9 @@ app.post('/api/session/start', (req, res) => {
                 else if (unit.toLowerCase() === 'mh/s') hashrate *= 1000000;
                 else if (unit.toLowerCase() === 'gh/s') hashrate *= 1000000000;
                 if (activeSessions[sessionId]) {
-                    activeSessions[sessionId].stats.latestSpeeds[deviceId] = hashrate;
+                    // Only record non-zero speeds so the final "0 H/s" on exhaustion
+                    // doesn't erase the real speed used for avgHashrate calculation
+                    if (hashrate > 0) activeSessions[sessionId].stats.latestSpeeds[deviceId] = hashrate;
                     const knownDevices = Object.keys(activeSessions[sessionId].stats.latestSpeeds);
                     const isAggregate = deviceId === '*' || (knownDevices.length === 1 && deviceId === '1');
                     io.emit('stats_update', { sessionId, type: 'hashrate', value: hashrate, isAggregate });
@@ -855,7 +863,16 @@ app.post('/api/session/start', (req, res) => {
           const s = activeSessions[sessionId];
           const endTime = Date.now();
           duration = (endTime - s.startTime) / 1000;
-          const avg = s.stats.hashrateCount > 0 ? s.stats.hashrateSum / s.stats.hashrateCount : 0;
+          let avg = 0;
+          if (s.stats.hashrateCount > 0) {
+              avg = s.stats.hashrateSum / s.stats.hashrateCount;
+          } else {
+              // Fallback: use last known speed reading (covers fast attacks that complete before --status-timer fires)
+              const speeds = s.stats.latestSpeeds || {};
+              const agg = speeds['*'];
+              avg = agg !== undefined ? agg :
+                  Object.entries(speeds).filter(([k]) => !isNaN(parseInt(k))).reduce((acc, [, v]) => acc + v, 0);
+          }
           const avgPwr = s.stats.powerReadings > 0 ? s.stats.powerSum / s.stats.powerReadings : 0;
           finalStats = { recovered: s.stats.recoveredCount, total: s.stats.total, avgHashrate: avg, avgPower: avgPwr };
       }
@@ -919,21 +936,676 @@ app.post('/api/session/start', (req, res) => {
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
+// === SMART WORKFLOW ===
+
+// Shared stats parser — used by both regular sessions and smart workflow phases
+const parseAndEmitStats = (line, sessionId) => {
+    const statusMatch = line.match(/Status\.+:\s+(.*)/i);
+    if (statusMatch) {
+        const s = statusMatch[1].trim().toUpperCase();
+        let e = 'RUNNING';
+        if (s === 'PAUSED') e = 'PAUSED';
+        else if (s === 'EXHAUSTED' || s === 'QUIT') e = 'COMPLETED';
+        io.emit('session_status', { sessionId, status: e });
+    }
+    const speedMatch = line.match(/Speed\.#(\*|\d+).*?:\s+([\d\.]+)\s+([a-zA-Z]+\/s)/i);
+    if (speedMatch) {
+        const val = parseFloat(speedMatch[2]);
+        const unit = speedMatch[3].toLowerCase();
+        let h = val;
+        if (unit === 'kh/s') h *= 1000;
+        else if (unit === 'mh/s') h *= 1000000;
+        else if (unit === 'gh/s') h *= 1000000000;
+        io.emit('stats_update', { sessionId, type: 'hashrate', value: h, isAggregate: speedMatch[1] === '*' });
+        if (activeSessions[sessionId]) {
+            const st = activeSessions[sessionId].stats;
+            if (!st.latestSpeeds) st.latestSpeeds = {};
+            // Only record non-zero speeds so the exhaustion "0 H/s" line doesn't
+            // erase the real speed before the average is computed
+            if (h > 0) st.latestSpeeds[speedMatch[1]] = h;
+        }
+    }
+    const progMatch = line.match(/Progress.*?:\s+\d+\/\d+\s+\(([\d\.]+)%\)/i);
+    if (progMatch) {
+        io.emit('stats_update', { sessionId, type: 'progress', value: parseFloat(progMatch[1]) });
+        if (activeSessions[sessionId]) {
+            const st = activeSessions[sessionId].stats;
+            const speeds = st.latestSpeeds || {};
+            let currentTotal = speeds['*'];
+            if (currentTotal === undefined) {
+                currentTotal = Object.entries(speeds).filter(([k]) => !isNaN(parseInt(k))).reduce((acc, [, v]) => acc + v, 0);
+            }
+            if (currentTotal > 0) { st.hashrateSum += currentTotal; st.hashrateCount++; }
+        }
+    }
+    const timeMatch = line.match(/Time\.Estimated.*?:\s+(.*)/i);
+    if (timeMatch) {
+        const pm = timeMatch[1].match(/\((.*?)\)/);
+        io.emit('stats_update', { sessionId, type: 'time_estimated', value: pm ? pm[1] : timeMatch[1] });
+    }
+    const recMatch = line.match(/Recovered.*?:\s+(\d+)\/(\d+)/i);
+    if (recMatch) {
+        const r = parseInt(recMatch[1]);
+        const t = parseInt(recMatch[2]);
+        io.emit('stats_update', { sessionId, type: 'recovered', value: r });
+        io.emit('stats_update', { sessionId, type: 'total', value: t });
+        if (activeSessions[sessionId]) {
+            activeSessions[sessionId].stats.recovered = r;
+            activeSessions[sessionId].stats.total = t;
+        }
+    }
+};
+
+const activeWorkflows = {};
+
+const countPotfileEntries = (filePath) => {
+    if (!fs.existsSync(filePath)) return 0;
+    try {
+        return fs.readFileSync(filePath, 'utf-8').split(/\r?\n/).filter(l => l.trim() && l.includes(':')).length;
+    } catch { return 0; }
+};
+
+const getMaskFromWordNode = (word) => {
+    return word.split('').map(char => {
+        if (/[a-z]/.test(char)) return '?l';
+        if (/[A-Z]/.test(char)) return '?u';
+        if (/[0-9]/.test(char)) return '?d';
+        return '?s';
+    }).join('');
+};
+
+// Exact same complexity model as Insights frontend
+const getMaskComplexity = (mask) => {
+    let count = 1;
+    for (let i = 0; i < mask.length; i += 2) {
+        const token = mask.substring(i, i + 2);
+        if (token === '?l' || token === '?u') count *= 26;
+        else if (token === '?d') count *= 10;
+        else if (token === '?s') count *= 33;
+        else if (token === '?a') count *= 95;
+        else if (token === '?b') count *= 256;
+    }
+    return count;
+};
+
+const generateSmartAssets = (outfilePath, {
+    maxMasks = 20,
+    maskMinLen = 0,
+    maskMaxLen = 0,
+    hashrateHps = 0,       // H/s — used for time-budget mask selection
+    timeBudgetSeconds = 0, // 0 = use maxMasks fallback
+    sortMode = 'occurrence' // 'occurrence' | 'efficiency'
+} = {}) => {
+    if (!fs.existsSync(outfilePath)) return null;
+    const maskCounts = {};
+    const prefixCounts = {};
+    const suffixCounts = {};
+    const leetspeakHits = {};
+    const yearCounts = {};
+    const plaintexts = [];
+    const leetspeakMap = { '@': 'a', '4': 'a', '3': 'e', '1': 'i', '!': 'i', '0': 'o', '$': 's', '5': 's', '7': 't' };
+
+    try {
+        const lines = fs.readFileSync(outfilePath, 'utf-8').split(/\r?\n/).filter(l => l.trim());
+        lines.forEach(line => {
+            const plain = line.trim();
+            if (!plain) return;
+            plaintexts.push(plain);
+            const mask = getMaskFromWordNode(plain);
+            maskCounts[mask] = (maskCounts[mask] || 0) + 1;
+
+            // Prefix/suffix extraction (non-alpha edges)
+            const m = plain.match(/^([^a-zA-Z]*)([a-zA-Z]+.*[a-zA-Z]|[a-zA-Z])([^a-zA-Z]*)$/);
+            if (m) {
+                if (m[1]) prefixCounts[m[1]] = (prefixCounts[m[1]] || 0) + 1;
+                if (m[3]) suffixCounts[m[3]] = (suffixCounts[m[3]] || 0) + 1;
+            }
+
+            // Year detection (1900–2099)
+            const years = plain.match(/(?:19|20)\d{2}/g);
+            if (years) years.forEach(y => { yearCounts[y] = (yearCounts[y] || 0) + 1; });
+
+            // Leetspeak char counts
+            for (const char of plain) {
+                if (leetspeakMap[char]) leetspeakHits[char] = (leetspeakHits[char] || 0) + 1;
+            }
+        });
+
+        if (plaintexts.length === 0) return null;
+
+        // Build mask entries with complexity for time-budget calculation
+        const maskEntries = Object.entries(maskCounts)
+            .map(([mask, count]) => ({ mask, count, complexity: getMaskComplexity(mask) }))
+            .filter(({ mask }) => {
+                const len = mask.length / 2; // each token is exactly 2 chars
+                if (maskMinLen > 0 && len < maskMinLen) return false;
+                if (maskMaxLen > 0 && len > maskMaxLen) return false;
+                return true;
+            });
+
+        // Sort: occurrence = most common first; efficiency = most cracks per cracking-second first
+        if (sortMode === 'efficiency') {
+            maskEntries.sort((a, b) => (a.complexity / a.count) - (b.complexity / b.count));
+        } else {
+            maskEntries.sort((a, b) => b.count - a.count);
+        }
+
+        let topMasks;
+        let skippedMasks = [];
+        let estimatedSeconds = 0;
+        if (hashrateHps > 0 && timeBudgetSeconds > 0) {
+            // Accumulate masks that fit within the time budget; collect the rest as skipped
+            topMasks = [];
+            for (const { mask, complexity } of maskEntries) {
+                const maskTime = complexity / hashrateHps;
+                if (estimatedSeconds + maskTime > timeBudgetSeconds) {
+                    skippedMasks.push(mask);
+                    continue;
+                }
+                topMasks.push(mask);
+                estimatedSeconds += maskTime;
+            }
+            // No fallback — if nothing fits, skip phase 3 entirely and notify user
+        } else {
+            topMasks = maskEntries.slice(0, maxMasks).map(e => e.mask);
+            skippedMasks = maskEntries.slice(maxMasks).map(e => e.mask);
+            estimatedSeconds = hashrateHps > 0
+                ? topMasks.reduce((s, m) => s + getMaskComplexity(m) / hashrateHps, 0)
+                : 0;
+        }
+        const allMasks = maskEntries.map(e => e.mask);
+        const budgetExhausted = hashrateHps > 0 && timeBudgetSeconds > 0 && topMasks.length === 0 && allMasks.length > 0;
+
+        // --- Enhanced rule generation ---
+        const ruleLines = [
+            '# Dynamic mutations — Reactor Smart Workflow',
+            ':',       // no-op (passthrough)
+            'c',       // capitalize first
+            'u',       // uppercase all
+            'l',       // lowercase all
+            'r',       // reverse
+            'C',       // lowercase first, uppercase rest
+            'd',       // duplicate
+            'q',       // duplicate all
+            '$1',      // append 1
+            '$!',      // append !
+            '$2$0$2$4', // append 2024
+            '$2$0$2$3', // append 2023
+            '$1$2$3',  // append 123
+        ];
+
+        // Observed suffixes (up to 12)
+        Object.entries(suffixCounts).sort(([, a], [, b]) => b - a).slice(0, 12).forEach(([suf]) => {
+            ruleLines.push(suf.split('').map(c => `$${c}`).join(''));
+        });
+
+        // Observed prefixes (up to 6)
+        Object.entries(prefixCounts).sort(([, a], [, b]) => b - a).slice(0, 6).forEach(([pre]) => {
+            ruleLines.push(pre.split('').reverse().map(c => `^${c}`).join(' '));
+        });
+
+        // Observed year appends (top 5)
+        Object.entries(yearCounts).sort(([, a], [, b]) => b - a).slice(0, 5).forEach(([year]) => {
+            ruleLines.push(year.split('').map(c => `$${c}`).join(''));
+        });
+
+        // Leetspeak substitutions (most common observed chars)
+        const leetRuleMap = { '@': 'a', '4': 'a', '3': 'e', '1': 'i', '0': 'o', '$': 's', '7': 't' };
+        Object.entries(leetspeakHits).sort(([, a], [, b]) => b - a).slice(0, 7).forEach(([char]) => {
+            if (leetRuleMap[char]) ruleLines.push(`s${leetRuleMap[char]}${char}`);
+        });
+
+        const etaStr = estimatedSeconds > 0
+            ? (estimatedSeconds < 60 ? `${estimatedSeconds.toFixed(0)}s`
+                : estimatedSeconds < 3600 ? `${(estimatedSeconds / 60).toFixed(1)}m`
+                : `${(estimatedSeconds / 3600).toFixed(1)}h`)
+            : null;
+
+        return {
+            masks: topMasks,
+            skippedMasks,
+            allMasks,
+            budgetExhausted,
+            ruleContent: ruleLines.join('\n'),
+            plaintexts,
+            count: plaintexts.length,
+            estimatedPhase3Seconds: estimatedSeconds,
+            estimatedPhase3Eta: etaStr,
+        };
+    } catch (e) {
+        console.error('[Smart Workflow] Asset generation error:', e.message);
+        return null;
+    }
+};
+
+app.post('/api/smart-workflow/start', (req, res) => {
+    const {
+        targetPath, hashType, wordlistPath, initialRulePath,
+        // ── Global performance / hardware (mirrors regular session logic) ──
+        workloadProfile = 3,
+        devices,
+        optimizedKernel = false,         // -O
+        statusTimer = 3,                 // --status-timer
+        hwmonDisable = false,            // --hwmon-disable
+        backendDisableOpenCL = false,    // --backend-ignore-opencl
+        backendIgnoreCuda = false,       // --backend-ignore-cuda
+        selfTestDisable = false,         // --self-test-disable
+        keepGuessing = false,            // --keep-guessing
+        logfileDisable = false,          // --logfile-disable
+        force = false,                   // --force
+        bitmapMax = 24,                  // --bitmap-max
+        remove = false,                  // --remove
+        // ── Workflow-specific Phase 3 controls ──
+        maskMinLen = 4, maskMaxLen = 12,
+        phase3Runtime = 0,               // seconds hard cap via --runtime (0 = off)
+        phase3Increment = false,
+        maxMasks = 20,
+        skipPhase3 = false,
+        skipPhase4 = false,
+        phase4RulePaths = [],            // user-specified rule files for phase 4 sequential passes
+        phase3TimeBudgetSeconds = 0,
+        phase3HashrateHps = 0,
+        historicalHashrateHps = 0,
+        phase3SortMode = 'occurrence',
+    } = req.body;
+
+    if (!targetPath || !hashType || !wordlistPath) {
+        return res.status(400).json({ message: 'targetPath, hashType, and wordlistPath are required.' });
+    }
+
+    const { executable, cwd } = getHashcatConfig();
+    const workflowId = `sw_${Date.now()}_${uuid()}`;
+    const outfilePath = path.join(uploadDir, `${workflowId}_temp.out`);
+    const maskfilePath = path.join(uploadDir, `${workflowId}_dynamic.hcmask`);
+    const rulefilePath = path.join(uploadDir, `${workflowId}_dynamic.rule`);
+    const plaintextDictPath = path.join(uploadDir, `${workflowId}_plaintexts.txt`);
+    const sessionPotFile = path.join(uploadDir, `${workflowId}.potfile`);
+
+    try {
+        if (fs.existsSync(POTFILE_PATH)) fs.copyFileSync(POTFILE_PATH, sessionPotFile);
+        else fs.writeFileSync(sessionPotFile, '');
+    } catch (e) {}
+
+    const emitPhase = (phase, message, extra = {}) => {
+        io.emit('smart_workflow_phase', { workflowId, phase, message, ...extra });
+        io.emit('log', { sessionId: workflowId, level: 'INFO', message: `[Smart Phase ${phase}/4] ${message}` });
+    };
+
+    // Build the shared global-flag args that mirror the regular session builder.
+    // These apply to every phase so all user-configured performance / hardware
+    // settings are respected exactly as they would be in a normal session.
+    const globalArgs = ['-w', workloadProfile.toString()];
+    if (devices) globalArgs.push('-d', devices);
+    if (optimizedKernel) globalArgs.push('-O');
+    if (remove) globalArgs.push('--remove');
+    if (hwmonDisable) globalArgs.push('--hwmon-disable');
+    if (backendDisableOpenCL) globalArgs.push('--backend-ignore-opencl');
+    if (backendIgnoreCuda) globalArgs.push('--backend-ignore-cuda');
+    if (selfTestDisable) globalArgs.push('--self-test-disable');
+    if (keepGuessing) globalArgs.push('--keep-guessing');
+    if (logfileDisable) globalArgs.push('--logfile-disable');
+    if (force) globalArgs.push('--force');
+    if (bitmapMax && bitmapMax !== 24) globalArgs.push(`--bitmap-max=${bitmapMax}`);
+
+    // Potfile watcher — emits cracks across all phases
+    let lastPotSize = 0;
+    try { lastPotSize = fs.statSync(sessionPotFile).size; } catch(e) {}
+    fs.watchFile(sessionPotFile, { interval: 500 }, () => {
+        try {
+            const stats = fs.statSync(sessionPotFile);
+            if (stats.size > lastPotSize) {
+                const stream = fs.createReadStream(sessionPotFile, { start: lastPotSize, end: stats.size - 1 });
+                let buf = '';
+                stream.on('data', chunk => { buf += chunk.toString(); });
+                stream.on('end', () => {
+                    buf.split('\n').forEach(line => {
+                        const parsed = parsePotfileLine(line);
+                        if (parsed) {
+                            io.emit('session_crack', { sessionId: workflowId, hash: parsed.hash, plain: parsed.plain });
+                            if (activeSessions[workflowId]) activeSessions[workflowId].stats.recoveredCount++;
+                            try { fs.appendFileSync(POTFILE_PATH, line.trim() + '\n'); } catch(e) {}
+                        }
+                    });
+                });
+                lastPotSize = stats.size;
+            }
+        } catch(e) {}
+    });
+
+    // Runs a hashcat phase, registers its process in activeSessions, parses live stats
+    const runHashcatPhase = (args, phaseLabel) => {
+        return new Promise((resolve) => {
+            let exitHandled = false;
+
+            const onData = (raw) => {
+                const str = raw.toString().replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '');
+                str.split('\n').forEach(line => {
+                    const t = line.trim();
+                    if (!t) return;
+                    io.emit('log', { sessionId: workflowId, level: 'INFO', message: t });
+                    parseAndEmitStats(t, workflowId);
+                });
+            };
+
+            const onExit = (code) => {
+                if (exitHandled) return;
+                exitHandled = true;
+                io.emit('log', { sessionId: workflowId, level: code === 0 ? 'SUCCESS' : 'WARN', message: `[Smart Workflow] ${phaseLabel} finished (exit ${code})` });
+                resolve(code);
+            };
+
+            try {
+                const spawnType = pty ? 'pty' : 'spawn';
+                let currentChild;
+                if (pty) {
+                    currentChild = pty.spawn(executable, args, { name: 'xterm-color', cols: 80, rows: 30, cwd, env: process.env });
+                    currentChild.onData(onData);
+                    currentChild.onExit(({ exitCode }) => onExit(exitCode));
+                } else {
+                    currentChild = spawn(executable, args, { cwd, stdio: 'pipe' });
+                    currentChild.stdout.on('data', onData);
+                    currentChild.stderr.on('data', d => onData(d.toString()));
+                    currentChild.on('close', onExit);
+                    currentChild.on('error', (err) => { io.emit('log', { sessionId: workflowId, level: 'ERROR', message: err.message }); onExit(1); });
+                }
+
+                // Register in activeSessions so pause/resume/bypass/stop endpoints work
+                const prevStats = activeSessions[workflowId]?.stats || {
+                    recovered: 0, recoveredCount: 0, total: 0,
+                    hashrateSum: 0, hashrateCount: 0, latestSpeeds: {},
+                    powerSum: 0, powerReadings: 0
+                };
+                activeSessions[workflowId] = {
+                    process: currentChild,
+                    type: spawnType,
+                    startTime: activeSessions[workflowId]?.startTime || Date.now(),
+                    name: `Smart Workflow (${hashType})`,
+                    potFile: sessionPotFile,
+                    isWorkflow: true,
+                    stats: prevStats,
+                };
+            } catch(e) {
+                io.emit('log', { sessionId: workflowId, level: 'ERROR', message: `Spawn error: ${e.message}` });
+                resolve(1);
+            }
+        });
+    };
+
+    res.json({ success: true, workflowId });
+    sessionCounter++;
+    activeWorkflows[workflowId] = { aborted: false };
+    io.emit('session_started', { sessionId: workflowId, name: `Smart Workflow (${hashType})`, target: path.basename(targetPath), hashType, attackMode: 0 });
+    io.emit('session_status', { sessionId: workflowId, status: 'RUNNING' });
+
+    (async () => {
+        const tempFiles = [outfilePath, maskfilePath, rulefilePath, plaintextDictPath, sessionPotFile];
+        try {
+            // Phase 1: Dictionary + optional rule
+            emitPhase(1, 'Dictionary attack (quick hits)...');
+            const p1StartCount = countPotfileEntries(sessionPotFile);
+            const phase1Args = [
+                '-m', hashType.toString(), '-a', '0',
+                '--potfile-path', sessionPotFile, '--session', `${workflowId}_p1`,
+                '--status', '--status-timer', statusTimer.toString(),
+                '--outfile', outfilePath, '--outfile-format', '2',
+                ...globalArgs,
+            ];
+            phase1Args.push(targetPath, wordlistPath);
+            if (initialRulePath) phase1Args.push('-r', initialRulePath);
+            console.log(`[Smart Workflow P1] ${executable} ${phase1Args.join(' ')}`);
+            await runHashcatPhase(phase1Args, 'Phase 1');
+            const p1Recovered = countPotfileEntries(sessionPotFile) - p1StartCount;
+            io.emit('smart_workflow_phase', { workflowId, phase: 1, message: `Phase 1 complete — ${p1Recovered} recovered`, phaseRecovered: p1Recovered });
+            if (activeWorkflows[workflowId]?.aborted) throw new Error('__ABORTED__');
+
+            // Phase 2: Asset generation (Node.js, no subprocess)
+            emitPhase(2, 'Analyzing cracked hashes & generating dynamic attack assets...');
+            // Prefer the hashrate measured during Phase 1 over the frontend-supplied value.
+            // The frontend value is often 0 (queue path hardcodes 0; direct start uses session.hashrate
+            // which is 0 when no prior session is running).  Phase 1 always runs first and its stats
+            // are accumulated into activeSessions[workflowId].stats by parseAndEmitStats.
+            const p1Stats = activeSessions[workflowId]?.stats || {};
+            let measuredHashrateHps = 0;
+            if (p1Stats.hashrateCount > 0) {
+                measuredHashrateHps = p1Stats.hashrateSum / p1Stats.hashrateCount;
+            } else if (p1Stats.latestSpeeds) {
+                const speeds = p1Stats.latestSpeeds;
+                measuredHashrateHps = speeds['*'] !== undefined ? speeds['*'] :
+                    Object.entries(speeds).filter(([k]) => !isNaN(parseInt(k))).reduce((acc, [, v]) => acc + v, 0);
+            }
+            // Pick the best hashrate source. A tiny Phase 1 dictionary can finish
+            // before the GPU reaches steady state, leaving `measuredHashrateHps`
+            // artificially low — using it as-is would make Phase 2 budget too few
+            // masks. If history has a realistic rate for this hash type, trust
+            // the larger of the two. Historical rate comes from pastSessions on
+            // the frontend (same compensation as Insights detectHashrateForAlgo).
+            let effectiveHashrateHps = 0;
+            let hashrateSource = 'none';
+            if (historicalHashrateHps > 0 && historicalHashrateHps > measuredHashrateHps) {
+                effectiveHashrateHps = historicalHashrateHps;
+                hashrateSource = measuredHashrateHps > 0 ? 'historical (Phase 1 rate too low)' : 'historical';
+            } else if (measuredHashrateHps > 0) {
+                effectiveHashrateHps = measuredHashrateHps;
+                hashrateSource = 'measured (Phase 1)';
+            } else if (phase3HashrateHps > 0) {
+                effectiveHashrateHps = phase3HashrateHps;
+                hashrateSource = 'live session';
+            }
+            const assets = generateSmartAssets(outfilePath, {
+                maxMasks, maskMinLen, maskMaxLen,
+                hashrateHps: effectiveHashrateHps,
+                timeBudgetSeconds: phase3TimeBudgetSeconds,
+                sortMode: phase3SortMode,
+            });
+            if (!assets || assets.count === 0) {
+                emitPhase(2, 'No hashes cracked in Phase 1 — skipping adaptive phases.', { skipped: true });
+                io.emit('session_status', { sessionId: workflowId, status: 'COMPLETED' });
+                const swSessE = activeSessions[workflowId];
+                const swDurE = swSessE ? (Date.now() - swSessE.startTime) / 1000 : 0;
+                const swStatsE = swSessE?.stats || {};
+                const swHrE = (swStatsE.hashrateCount || 0) > 0 ? swStatsE.hashrateSum / swStatsE.hashrateCount : 0;
+                const swPwrE = (swStatsE.powerReadings || 0) > 0 ? swStatsE.powerSum / swStatsE.powerReadings : 0;
+                io.emit('session_finished', { sessionId: workflowId, duration: swDurE, recovered: swStatsE.recoveredCount || 0, total: swStatsE.total || 0, avgHashrate: swHrE, avgPower: swPwrE });
+                return;
+            }
+            fs.writeFileSync(maskfilePath, assets.masks.join('\n'));
+            fs.writeFileSync(rulefilePath, assets.ruleContent);
+            fs.writeFileSync(plaintextDictPath, assets.plaintexts.join('\n'));
+            // Write persistent all-masks file (not deleted at end — kept for user download)
+            const allMaskfilePath = path.join(uploadDir, `${workflowId}_all.hcmask`);
+            if (assets.allMasks.length > 0) fs.writeFileSync(allMaskfilePath, assets.allMasks.join('\n'));
+
+            let p2Detail;
+            if (assets.budgetExhausted) {
+                p2Detail = `Learned ${assets.count} passwords. Time budget too short for all ${assets.allMasks.length} extracted masks — skipping to Phase 4. Full mask file saved for download.`;
+                io.emit('log', { sessionId: workflowId, level: 'WARN', message: `[Smart Workflow] Time budget (${phase3TimeBudgetSeconds}s) is shorter than every extracted mask individually. Phase 3 skipped — ${assets.allMasks.length} masks saved for download.` });
+            } else if (assets.estimatedPhase3Eta) {
+                const skippedNote = assets.skippedMasks.length > 0 ? ` ${assets.skippedMasks.length} masks exceed budget and saved for download.` : '';
+                p2Detail = `Learned ${assets.count} passwords. ${assets.masks.length} masks fit within budget (est. ~${assets.estimatedPhase3Eta}).${skippedNote}`;
+            } else {
+                p2Detail = `Learned ${assets.count} passwords. Generated ${assets.masks.length} mask patterns + mutation rules.`;
+            }
+            emitPhase(2, p2Detail, {
+                learned: assets.count,
+                masks: assets.masks.length,
+                skippedMasks: assets.skippedMasks.length,
+                budgetExhausted: assets.budgetExhausted,
+                maskFileId: workflowId,
+                eta: assets.estimatedPhase3Eta,
+                hashrateHps: effectiveHashrateHps,
+                hashrateSource,
+            });
+            if (activeWorkflows[workflowId]?.aborted) throw new Error('__ABORTED__');
+
+            // Phase 3: Targeted mask attack
+            const p3StartCount = countPotfileEntries(sessionPotFile);
+            if (!skipPhase3 && assets.masks.length > 0) {
+                const p3Desc = assets.estimatedPhase3Eta
+                    ? `Targeted mask attack — ${assets.masks.length} patterns, sort: ${phase3SortMode}, est. ~${assets.estimatedPhase3Eta}`
+                    : `Targeted mask attack with ${assets.masks.length} patterns (lengths ${maskMinLen || '?'}–${maskMaxLen || '?'})`;
+                emitPhase(3, p3Desc);
+                const phase3Args = [
+                    '-m', hashType.toString(), '-a', '3',
+                    '--potfile-path', sessionPotFile, '--session', `${workflowId}_p3`,
+                    '--status', '--status-timer', statusTimer.toString(),
+                    ...globalArgs,
+                ];
+                if (phase3Runtime > 0) phase3Args.push('--runtime', phase3Runtime.toString());
+                if (phase3Increment) {
+                    phase3Args.push('--increment');
+                    if (maskMinLen > 0) phase3Args.push(`--increment-min=${maskMinLen}`);
+                    if (maskMaxLen > 0) phase3Args.push(`--increment-max=${maskMaxLen}`);
+                }
+                phase3Args.push(targetPath, maskfilePath);
+                console.log(`[Smart Workflow P3] ${executable} ${phase3Args.join(' ')}`);
+                await runHashcatPhase(phase3Args, 'Phase 3');
+                const p3Recovered = countPotfileEntries(sessionPotFile) - p3StartCount;
+                io.emit('smart_workflow_phase', { workflowId, phase: 3, message: `Phase 3 complete — ${p3Recovered} recovered`, phaseRecovered: p3Recovered });
+            } else {
+                let p3SkipMsg;
+                if (skipPhase3) p3SkipMsg = 'Phase 3 skipped by user.';
+                else if (assets.budgetExhausted) p3SkipMsg = `Time budget too short for all ${assets.allMasks.length} masks — skipped. Download mask file from session history to run later.`;
+                else p3SkipMsg = 'Phase 3 skipped (no masks matched length filter).';
+                emitPhase(3, p3SkipMsg, { skipped: true });
+            }
+            if (activeWorkflows[workflowId]?.aborted) throw new Error('__ABORTED__');
+
+            // Phase 4: Feedback rule attack
+            const p4StartCount = countPotfileEntries(sessionPotFile);
+            let p4EmittedDelta = 0; // total phaseRecovered already reported for phase 4
+            const emitPhase4Progress = (subLabel) => {
+                const total = countPotfileEntries(sessionPotFile) - p4StartCount;
+                const newDelta = total - p4EmittedDelta;
+                if (newDelta > 0) {
+                    io.emit('smart_workflow_phase', { workflowId, phase: 4, message: `${subLabel} — +${newDelta} recovered`, phaseRecovered: newDelta });
+                    p4EmittedDelta = total;
+                }
+            };
+            if (!skipPhase4) {
+                // Expand plaintext dict with any hashes cracked in Phase 3 (from potfile)
+                try {
+                    const potLines = fs.readFileSync(sessionPotFile, 'utf-8').split(/\r?\n/).filter(l => l.trim());
+                    const existingSet = new Set(assets.plaintexts);
+                    const allPlaintexts = [...assets.plaintexts];
+                    potLines.forEach(line => {
+                        const parsed = parsePotfileLine(line);
+                        if (parsed && !existingSet.has(parsed.plain)) {
+                            allPlaintexts.push(parsed.plain);
+                            existingSet.add(parsed.plain);
+                        }
+                    });
+                    fs.writeFileSync(plaintextDictPath, allPlaintexts.join('\n'));
+                    emitPhase(4, `Feedback rule attack (${allPlaintexts.length} plaintexts × dynamic mutations)...`);
+                } catch(e) {
+                    emitPhase(4, `Feedback rule attack (${assets.count} learned plaintexts × dynamic mutations)...`);
+                }
+
+                // 4a: dynamic rule (always)
+                const phase4aArgs = [
+                    '-m', hashType.toString(), '-a', '0',
+                    '--potfile-path', sessionPotFile, '--session', `${workflowId}_p4a`,
+                    '--status', '--status-timer', statusTimer.toString(),
+                    '-r', rulefilePath,
+                    ...globalArgs,
+                ];
+                phase4aArgs.push(targetPath, plaintextDictPath);
+                console.log(`[Smart Workflow P4a] ${executable} ${phase4aArgs.join(' ')}`);
+                await runHashcatPhase(phase4aArgs, 'Phase 4 (dynamic rules)');
+                emitPhase4Progress('Phase 4a (dynamic rules)');
+                if (activeWorkflows[workflowId]?.aborted) throw new Error('__ABORTED__');
+
+                // 4b: global rule from Config tab (if provided)
+                if (initialRulePath) {
+                    emitPhase(4, `Phase 4 — global rule pass: ${initialRulePath.split(/[\\/]/).pop()}...`);
+                    const phase4bArgs = [
+                        '-m', hashType.toString(), '-a', '0',
+                        '--potfile-path', sessionPotFile, '--session', `${workflowId}_p4b`,
+                        '--status', '--status-timer', statusTimer.toString(),
+                        '-r', initialRulePath,
+                        ...globalArgs,
+                    ];
+                    phase4bArgs.push(targetPath, plaintextDictPath);
+                    console.log(`[Smart Workflow P4b] ${executable} ${phase4bArgs.join(' ')}`);
+                    await runHashcatPhase(phase4bArgs, 'Phase 4b (global rule)');
+                    emitPhase4Progress('Phase 4b (global rule)');
+                    if (activeWorkflows[workflowId]?.aborted) throw new Error('__ABORTED__');
+                }
+
+                // 4c+: user-specified custom rule files (sequential)
+                const validPhase4Rules = (phase4RulePaths || []).filter(p => p && p.trim() && fs.existsSync(p.trim()));
+                for (let i = 0; i < validPhase4Rules.length; i++) {
+                    const rulePath = validPhase4Rules[i].trim();
+                    emitPhase(4, `Phase 4 — custom rule ${i + 1}/${validPhase4Rules.length}: ${rulePath.split(/[\\/]/).pop()}...`);
+                    const phase4xArgs = [
+                        '-m', hashType.toString(), '-a', '0',
+                        '--potfile-path', sessionPotFile, '--session', `${workflowId}_p4c${i}`,
+                        '--status', '--status-timer', statusTimer.toString(),
+                        '-r', rulePath,
+                        ...globalArgs,
+                    ];
+                    phase4xArgs.push(targetPath, plaintextDictPath);
+                    console.log(`[Smart Workflow P4c${i}] ${executable} ${phase4xArgs.join(' ')}`);
+                    await runHashcatPhase(phase4xArgs, `Phase 4 custom rule ${i + 1}`);
+                    emitPhase4Progress(`Phase 4 custom rule ${i + 1}`);
+                    if (activeWorkflows[workflowId]?.aborted) throw new Error('__ABORTED__');
+                }
+
+                const p4Recovered = countPotfileEntries(sessionPotFile) - p4StartCount;
+                const p4FinalDelta = p4Recovered - p4EmittedDelta;
+                io.emit('smart_workflow_phase', { workflowId, phase: 4, message: `Phase 4 complete — ${p4Recovered} recovered`, phaseRecovered: p4FinalDelta > 0 ? p4FinalDelta : undefined });
+            } else {
+                emitPhase(4, 'Phase 4 skipped by user.', { skipped: true });
+            }
+
+            emitPhase(4, 'Smart Workflow complete!', { complete: true, maskFileId: workflowId });
+            io.emit('session_status', { sessionId: workflowId, status: 'COMPLETED' });
+            {
+                const swSess = activeSessions[workflowId];
+                const swDuration = swSess ? (Date.now() - swSess.startTime) / 1000 : 0;
+                const swStats = swSess?.stats || {};
+                const swAvgHashrate = (swStats.hashrateCount || 0) > 0 ? swStats.hashrateSum / swStats.hashrateCount : 0;
+                const swAvgPower = (swStats.powerReadings || 0) > 0 ? swStats.powerSum / swStats.powerReadings : 0;
+                io.emit('session_finished', { sessionId: workflowId, duration: swDuration, recovered: swStats.recoveredCount || 0, total: swStats.total || 0, avgHashrate: swAvgHashrate, avgPower: swAvgPower });
+            }
+        } catch (e) {
+            const isAbort = e.message === '__ABORTED__';
+            io.emit('log', { sessionId: workflowId, level: isAbort ? 'WARN' : 'ERROR', message: isAbort ? '[Smart Workflow] Stopped by user.' : `Smart Workflow Error: ${e.message}` });
+            io.emit('session_status', { sessionId: workflowId, status: isAbort ? 'STOPPED' : 'ERROR' });
+            {
+                const swSess = activeSessions[workflowId];
+                const swDuration = swSess ? (Date.now() - swSess.startTime) / 1000 : 0;
+                const swStats = swSess?.stats || {};
+                const swAvgHashrate = (swStats.hashrateCount || 0) > 0 ? swStats.hashrateSum / swStats.hashrateCount : 0;
+                const swAvgPower = (swStats.powerReadings || 0) > 0 ? swStats.powerSum / swStats.powerReadings : 0;
+                io.emit('session_finished', { sessionId: workflowId, duration: swDuration, recovered: swStats.recoveredCount || 0, total: swStats.total || 0, avgHashrate: swAvgHashrate, avgPower: swAvgPower });
+            }
+        } finally {
+            fs.unwatchFile(sessionPotFile);
+            if (activeSessions[workflowId]) delete activeSessions[workflowId];
+            if (activeWorkflows[workflowId]) delete activeWorkflows[workflowId];
+            tempFiles.forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch(e) {} });
+        }
+    })();
+});
+
 app.post('/api/session/stop', (req, res) => {
   const { sessionId } = req.body;
   const stopSession = (id) => {
       if(activeSessions[id]) {
           const s = activeSessions[id];
-          try { 
-              if (s.type === 'pty') s.process.kill(); 
-              else s.process.kill('SIGKILL'); 
+          // Signal smart workflow to abort between phases
+          if (s.isWorkflow && activeWorkflows[id]) activeWorkflows[id].aborted = true;
+          // Kill the process.  For regular (non-workflow) sessions we intentionally leave
+          // activeSessions[id] intact so that handleProcessExit fires with the full stats
+          // and emits session_finished with the real duration, hashrate and recovered count.
+          // Deleting activeSessions here before the process exits causes handleProcessExit
+          // to see a missing entry and emit all-zero stats, which the frontend then drops.
+          try {
+              if (s.type === 'pty') s.process.kill();
+              else s.process.kill('SIGKILL');
           } catch(e) {}
-          if(s.potFile && fs.existsSync(s.potFile)) {
-              fs.unwatchFile(s.potFile);
-              try { fs.unlinkSync(s.potFile); } catch(e) {}
-          }
           io.emit('log', { sessionId: id, level: 'WARN', message: `Session ${s.name} stopped manually.` });
-          io.emit('session_status', { sessionId: id, status: 'IDLE' }); 
+          io.emit('session_status', { sessionId: id, status: 'STOPPED' });
           return s.name;
       }
       return null;
@@ -955,18 +1627,32 @@ app.post('/api/session/stop', (req, res) => {
 app.post('/api/session/delete', (req, res) => {
     const { sessionId } = req.body;
     if (!sessionId) return res.status(400).json({ message: 'Session ID required' });
-    
-    const sessionPot = path.join(uploadDir, `${sessionId}.potfile`);
-    if (fs.existsSync(sessionPot)) { try { fs.unlinkSync(sessionPot); } catch(e) {} }
-    
+
+    // Kill active process if running
     if (activeSessions[sessionId]) {
        const s = activeSessions[sessionId];
-       try { 
+       // For workflow sessions, signal abort so the async loop stops between phases
+       if (s.isWorkflow && activeWorkflows[sessionId]) activeWorkflows[sessionId].aborted = true;
+       try {
            if (s.type === 'pty') s.process.kill();
-           else s.process.kill('SIGKILL'); 
+           else s.process.kill('SIGKILL');
        } catch(e) {}
-       delete activeSessions[sessionId];
+       if (!s.isWorkflow) delete activeSessions[sessionId];
     }
+
+    // Delete session potfile
+    const sessionPot = path.join(uploadDir, `${sessionId}.potfile`);
+    if (fs.existsSync(sessionPot)) { try { fs.unlinkSync(sessionPot); } catch(e) {} }
+
+    // Delete workflow temp files (covers orphans from crashes or sessions already completed)
+    const workflowTempFiles = [
+        path.join(uploadDir, `${sessionId}_temp.out`),
+        path.join(uploadDir, `${sessionId}_dynamic.hcmask`),
+        path.join(uploadDir, `${sessionId}_dynamic.rule`),
+        path.join(uploadDir, `${sessionId}_plaintexts.txt`),
+    ];
+    workflowTempFiles.forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch(e) {} });
+
     if (fs.existsSync(SESSIONS_PATH)) {
         try {
             let sessions = JSON.parse(fs.readFileSync(SESSIONS_PATH, 'utf-8'));
@@ -1014,7 +1700,7 @@ app.post('/api/target/check', async (req, res) => {
                 const plain = potfileMap.get(hash);
                 const entry = `${hash}:${plain}\n`;
                 if (writeStream.write(entry) === false) await new Promise(resolve => writeStream.once('drain', resolve));
-                if (foundCount < 100) found.push({ hash, plain });
+                found.push({ hash, plain });
                 foundCount++;
             }
         }
@@ -1111,6 +1797,14 @@ io.on('connection', (socket) => {
   socket.on('term_input', (data) => { if (ptyProcess) ptyProcess.write(data); });
   socket.on('term_resize', ({ cols, rows }) => { if (ptyProcess) ptyProcess.resize(cols, rows); });
   socket.on('disconnect', () => { if (ptyProcess) { ptyProcess.kill(); ptyProcess = null; } });
+});
+
+app.get('/api/smart-workflow/masks/:workflowId', (req, res) => {
+    const { workflowId } = req.params;
+    if (!/^sw_\d+_[a-z0-9]+$/.test(workflowId)) return res.status(400).send('Invalid workflow ID');
+    const filePath = path.join(uploadDir, `${workflowId}_all.hcmask`);
+    if (!fs.existsSync(filePath)) return res.status(404).send('Mask file not found');
+    res.download(filePath, `masks_${workflowId}.hcmask`);
 });
 
 app.get('*', (req, res) => {

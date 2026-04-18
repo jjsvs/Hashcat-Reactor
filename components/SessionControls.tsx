@@ -1,8 +1,14 @@
 import React, { useState } from 'react';
-import { 
-  Play, Pause, Save, Activity, FastForward, Loader2 
+import {
+  Play, Pause, Save, Activity, FastForward, Loader2
 } from 'lucide-react';
 import { SessionStatus } from '../types';
+
+const getApiUrl = () => {
+    const host = window.location.hostname;
+    if (host.includes('zrok.io') || window.location.port === '3001') return window.location.origin;
+    return 'http://localhost:3001';
+};
 
 interface SessionControlsProps {
     sessionId: string | null;
@@ -23,7 +29,7 @@ const SessionControls: React.FC<SessionControlsProps> = ({ sessionId, status, on
         // Note: 'b' (Bypass) keeps the session running, so no status change needed here.
 
         try {
-            await fetch('http://localhost:3001/api/session/action', {
+            await fetch(`${getApiUrl()}/api/session/action`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ sessionId, action })

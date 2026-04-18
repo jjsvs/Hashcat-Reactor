@@ -1,0 +1,26 @@
+[
+  {
+    "id": "6brg60c",
+    "date": "2025-12-02T00:28:45.589Z",
+    "duration": 2.811,
+    "mode": "SHA2-512",
+    "algorithmId": "1700",
+    "attackType": "Brute Force",
+    "attackMode": 3,
+    "recovered": 0,
+    "totalHashes": 0,
+    "avgHashrate": 0
+  },
+  {
+    "id": "tdet9h8",
+    "date": "2025-12-02T00:28:07.851Z",
+    "duration": 0.077,
+    "mode": "MD5",
+    "algorithmId": "0",
+    "attackType": "Wordlist",
+    "attackMode": 0,
+    "recovered": 0,
+    "totalHashes": 0,
+    "avgHashrate": 0
+  }
+]

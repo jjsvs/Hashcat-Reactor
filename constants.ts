@@ -38,7 +38,7 @@ export const DEFAULT_CONFIG: HashcatConfig = {
 
   optimizedKernel: true,
   workloadProfile: 3,
-  statusTimer: 30, 
+  statusTimer: 3,
   potfileDisable: false,
   remove: false,
   hwmonDisable: true,

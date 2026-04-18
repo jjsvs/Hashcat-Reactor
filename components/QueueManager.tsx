@@ -1,6 +1,6 @@
 import React from 'react';
 import { QueueItem } from '../types';
-import { Play, Trash2, Clock, List, AlertCircle, PauseCircle, PlayCircle } from 'lucide-react';
+import { Play, Trash2, Clock, List, AlertCircle, PauseCircle, PlayCircle, Workflow } from 'lucide-react';
 import { ATTACK_MODES, HASH_TYPES } from '../constants';
 import { useTranslation } from 'react-i18next';
 
@@ -100,7 +100,13 @@ const QueueManager: React.FC<QueueManagerProps> = ({
                     <div className="text-xs text-slate-500 font-mono">{t('queue_label_mode')} {job.config.hashType}</div>
                   </td>
                   <td className="p-4">
-                     <span className="text-sm text-slate-300">{getAttackModeName(job.config.attackMode)}</span>
+                    {job.workflowOpts ? (
+                      <span className="flex items-center gap-1.5 text-indigo-400 text-xs font-bold">
+                        <Workflow size={12} /> Smart Workflow
+                      </span>
+                    ) : (
+                      <span className="text-sm text-slate-300">{getAttackModeName(job.config.attackMode)}</span>
+                    )}
                   </td>
                   <td className="p-4">
                     <div className="flex flex-col gap-1">

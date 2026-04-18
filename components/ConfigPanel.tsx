@@ -1,13 +1,40 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
-import { HashcatConfig as IConfig } from '../types';
+import { HashcatConfig as IConfig, SmartWorkflowOpts } from '../types';
 import { ATTACK_MODES, HASH_TYPES } from '../constants';
-import { 
-  Copy, Terminal, Settings, Play, FolderOpen, ChevronDown, ChevronRight, 
-  Zap, Layers, Edit3, Lock, Wand2, Loader2, ListPlus, Cpu, HardDrive, 
+import {
+  Copy, Terminal, Settings, Play, FolderOpen, ChevronDown, ChevronRight,
+  Zap, Layers, Edit3, Lock, Wand2, Loader2, ListPlus, Cpu, HardDrive,
   RefreshCw, ToggleLeft, ToggleRight, ArrowUpRight, ArrowLeftRight, Search, X,
-  User, Divide, AlertTriangle
+  User, Divide, AlertTriangle, Workflow, Gauge, AlertOctagon
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+
+// Hash types known to be extremely slow (< ~1K H/s typical GPU)
+const VERY_SLOW_HASH_IDS = new Set([
+  '3200','25600','25800','30600','30601','28400', // bcrypt variants
+  '34000','70000',                                // Argon2
+  '8900','70100','70200',                         // scrypt
+]);
+// Hash types known to be slow (< ~100K H/s typical GPU)
+const SLOW_HASH_IDS = new Set([
+  '1800','7400','500','15100','35100',            // Unix crypt variants
+  '2100','1100','31500','31600',                  // DCC/MS-Cache
+  '400',                                          // phpass
+  '7100',                                         // macOS PBKDF2
+  '10900','12000','12100','11900','12800','32900', // PBKDF2 variants
+  '2500','22000','22001','16800','16801',          // WPA
+  '9200','9300',                                  // Cisco PBKDF2/scrypt
+]);
+
+const getHashSpeedTier = (id: string): 'very_slow' | 'slow' | 'fast' => {
+  if (VERY_SLOW_HASH_IDS.has(id)) return 'very_slow';
+  if (SLOW_HASH_IDS.has(id)) return 'slow';
+  const ht = HASH_TYPES.find(h => h.id === id);
+  if (ht?.category === 'Generic KDF') return 'very_slow';
+  return 'fast';
+};
+
+const SW_STORAGE_KEY = 'hashcat_sw_opts_v1';
 
 interface ExtendedConfig extends IConfig {
   username?: boolean;
@@ -24,6 +51,9 @@ interface ConfigPanelProps {
   setConfig: (config: IConfig) => void;
   onStart: (customCommand?: string) => void;
   onQueue: () => void;
+  onStartWorkflow?: (opts: SmartWorkflowOpts) => void;
+  onQueueWorkflow?: (opts: SmartWorkflowOpts) => void;
+  sessionHashrate?: number; // live hashrate from current session, used for speed warnings
 }
 
 interface ResourceFile {
@@ -45,7 +75,7 @@ const getSocketUrl = () => {
     return 'http://localhost:3001';
 };
 
-const ConfigPanel: React.FC<ConfigPanelProps> = ({ config: propConfig, setConfig: propSetConfig, onStart, onQueue }) => {
+const ConfigPanel: React.FC<ConfigPanelProps> = ({ config: propConfig, setConfig: propSetConfig, onStart, onQueue, onStartWorkflow, onQueueWorkflow, sessionHashrate }) => {
   const { t } = useTranslation();
   
   // Cast to ExtendedConfig to support new fields locally
@@ -74,6 +104,28 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config: propConfig, setConfig
     rule: 'file',
     mask: 'file'
   });
+
+  const SW_DEFAULTS: SmartWorkflowOpts = {
+    rulePath: '', maskMinLen: 4, maskMaxLen: 12, phase3Runtime: 0,
+    phase3Increment: false, optimizedKernel: false, maxMasks: 20,
+    skipPhase3: false, skipPhase4: false,
+    phase3TimeBudget: 1, phase3TimeUnit: 'hours', phase3SortMode: 'occurrence',
+    phase4RulePaths: [],
+  };
+  const [swAdvanced, setSwAdvanced] = useState(false);
+  const [swOpts, setSwOpts] = useState<SmartWorkflowOpts>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SW_STORAGE_KEY) || '{}');
+      return { ...SW_DEFAULTS, ...saved };
+    } catch { return SW_DEFAULTS; }
+  });
+
+  // Persist swOpts to localStorage whenever they change
+  useEffect(() => {
+    try {
+      localStorage.setItem(SW_STORAGE_KEY, JSON.stringify({ ...swOpts }));
+    } catch {}
+  }, [swOpts]);
 
   const fetchDevices = async () => {
     setScanningDevices(true);
@@ -649,7 +701,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config: propConfig, setConfig
                 <label className="block text-xs font-bold text-slate-500 mb-2">{t('config_workload')}</label>
                 <div className="flex gap-2">{[1,2,3,4].map(w => (<button key={w} onClick={() => setConfig({...config, workloadProfile: w})} className={`flex-1 py-1.5 text-xs font-bold rounded border transition-all ${config.workloadProfile === w ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-slate-950 border-slate-800 text-slate-400 hover:bg-slate-800'}`}>{w}</button>))}</div>
               </div>
-              <div><label className="block text-xs font-bold text-slate-500 mb-2">{t('config_status_timer')}</label><input type="number" value={config.statusTimer} onChange={e => setConfig({...config, statusTimer: parseInt(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500" placeholder="30" /></div>
+              <div><label className="block text-xs font-bold text-slate-500 mb-2">{t('config_status_timer')}</label><input type="number" value={config.statusTimer} onChange={e => setConfig({...config, statusTimer: parseInt(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500" placeholder="3" /></div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2">
                   {[{ label: t('config_opt_optimized'), key: 'optimizedKernel' }, { label: t('config_opt_remove'), key: 'remove' }, { label: t('config_opt_potfile'), key: 'potfileDisable' }, { label: t('config_opt_hwmon'), key: 'hwmonDisable' }].map((opt: any) => (<label key={opt.key} className="flex items-center gap-3 cursor-pointer group p-2 rounded hover:bg-slate-800/50"><input type="checkbox" checked={(config as any)[opt.key]} onChange={e => setConfig({...config, [opt.key]: e.target.checked})} className="w-4 h-4 rounded border-slate-700 bg-slate-950 checked:bg-indigo-600 focus:ring-indigo-500/20" /><span className="text-sm text-slate-300 group-hover:text-white font-medium">{opt.label}</span></label>))}
                </div>
@@ -707,6 +759,343 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config: propConfig, setConfig
         <div className="bg-slate-900 p-4 border-t border-slate-800 flex flex-col gap-3">
            <div className="flex gap-3"><button onClick={handleCopy} className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"><Copy size={16} /> {t('config_btn_copy')}</button><button onClick={handleRun} className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white py-2.5 rounded-lg text-sm font-medium transition-colors shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-2"><Play size={16} /> {isManualMode ? t('config_btn_run_custom') : t('config_btn_run_auto')}</button></div>
            {!isManualMode && (<button onClick={onQueue} className="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:text-white text-slate-300 py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"><ListPlus size={16} /> {t('config_btn_queue')}</button>)}
+        </div>
+
+        {/* SMART WORKFLOW */}
+        <div className="border-t border-indigo-900/50 p-4 flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-indigo-400 font-mono text-xs uppercase tracking-wider flex items-center gap-2 font-bold">
+              <Workflow size={13} /> Smart Workflow
+            </h3>
+          </div>
+
+          {/* Hash speed warning / recommendation */}
+          {(() => {
+            const tier = getHashSpeedTier(config.hashType || '0');
+            const measured = sessionHashrate && sessionHashrate > 0
+              ? (sessionHashrate < 1000
+                  ? `${sessionHashrate.toFixed(0)} H/s`
+                  : sessionHashrate < 1e6
+                    ? `${(sessionHashrate / 1000).toFixed(1)} KH/s`
+                    : `${(sessionHashrate / 1e6).toFixed(1)} MH/s`)
+              : null;
+            const suggestedRuntime = tier === 'very_slow' ? 10 : tier === 'slow' ? 30 : null;
+
+            if (tier === 'very_slow') return (
+              <div className="rounded-lg border border-red-800/40 bg-red-950/20 p-2.5 flex flex-col gap-1.5">
+                <div className="flex items-center gap-1.5 text-red-400 text-[11px] font-bold">
+                  <AlertOctagon size={12} /> Not recommended for this hash type
+                </div>
+                <p className="text-[10px] text-red-300/70 leading-relaxed">
+                  Smart Workflow runs multiple dictionary + mask phases. With very slow hashes
+                  {measured ? ` (measured: ${measured})` : ' (bcrypt / Argon2 / scrypt)'},
+                  Phase 3 could run for days. Set a time cap below.
+                </p>
+                {swOpts.phase3Runtime === 0 && (
+                  <button
+                    onClick={() => setSwOpts(o => ({ ...o, phase3Runtime: suggestedRuntime! }))}
+                    className="self-start text-[10px] font-bold text-red-300 bg-red-900/30 hover:bg-red-900/60 border border-red-700/40 rounded px-2 py-0.5 transition-colors"
+                  >
+                    Auto-set Phase 3 cap → {suggestedRuntime} min
+                  </button>
+                )}
+              </div>
+            );
+
+            if (tier === 'slow') return (
+              <div className="rounded-lg border border-amber-800/30 bg-amber-950/20 p-2.5 flex flex-col gap-1.5">
+                <div className="flex items-center gap-1.5 text-amber-400 text-[11px] font-bold">
+                  <AlertTriangle size={12} /> Slow hash type — use with caution
+                </div>
+                <p className="text-[10px] text-amber-300/60 leading-relaxed">
+                  This hash type is moderately slow
+                  {measured ? ` (${measured})` : ' (WPA / sha512crypt / PBKDF2)'}.
+                  Phase 3 mask attacks benefit from a runtime cap.
+                </p>
+                {swOpts.phase3Runtime === 0 && (
+                  <button
+                    onClick={() => setSwOpts(o => ({ ...o, phase3Runtime: suggestedRuntime! }))}
+                    className="self-start text-[10px] font-bold text-amber-300 bg-amber-900/20 hover:bg-amber-900/40 border border-amber-700/30 rounded px-2 py-0.5 transition-colors"
+                  >
+                    Auto-set Phase 3 cap → {suggestedRuntime} min
+                  </button>
+                )}
+              </div>
+            );
+
+            // Fast hash — show a positive tip
+            return (
+              <div className="rounded-lg border border-indigo-900/30 bg-indigo-950/10 p-2 flex items-center gap-2">
+                <Gauge size={12} className="text-indigo-400 shrink-0" />
+                <p className="text-[10px] text-indigo-300/60">
+                  Fast hash type{measured ? ` · ${measured}` : ''} — Smart Workflow is most effective here.
+                </p>
+              </div>
+            );
+          })()}
+
+          {/* Phase 1 Rule — inherited from global config */}
+          <div className="rounded-lg border border-slate-800 bg-slate-950/30 px-3 py-2 flex items-start gap-2">
+            <Gauge size={11} className="text-indigo-400 mt-0.5 shrink-0" />
+            <div className="min-w-0">
+              <p className="text-[9px] text-slate-400 leading-relaxed font-bold uppercase tracking-wider mb-0.5">Phase 1 Rule</p>
+              <p className="text-[9px] text-slate-500 leading-relaxed">
+                {config.rulePath
+                  ? <><span className="text-indigo-300 font-mono">{config.rulePath.split(/[\\/]/).pop()}</span> — from Config tab</>
+                  : <span className="text-slate-600">No rule set — configure in the <span className="text-slate-400 font-bold">Config</span> tab (Rule File field).</span>
+                }
+              </p>
+            </div>
+          </div>
+
+          {/* Phase steps */}
+          <div className="bg-slate-950/60 rounded-lg px-3 py-2 border border-slate-800 space-y-1.5">
+            {[
+              { n: 1, label: 'Dictionary attack', detail: config.wordlistPath ? `${config.wordlistPath.split(/[\\/]/).pop()}${config.rulePath ? ' + rule' : ''}` : 'No wordlist selected' },
+              { n: 2, label: 'Generate dynamic assets', detail: 'Masks + rules from cracked hashes' },
+              { n: 3, label: 'Targeted mask attack', detail: swOpts.skipPhase3 ? 'SKIPPED' : `Dynamic .hcmask${swOpts.phase3Runtime > 0 ? ` · ${swOpts.phase3Runtime}m cap` : ''}` },
+              { n: 4, label: 'Feedback rule attack', detail: swOpts.skipPhase4 ? 'SKIPPED' : `Dynamic rules${config.rulePath ? ' + global rule' : ''}${swOpts.phase4RulePaths?.length ? ` + ${swOpts.phase4RulePaths.length} custom rule(s)` : ''}` },
+            ].map(step => (
+              <div key={step.n} className="flex items-center gap-2">
+                <span className={`text-[9px] font-bold rounded px-1 py-0.5 shrink-0 ${(step.n === 3 && swOpts.skipPhase3) || (step.n === 4 && swOpts.skipPhase4) ? 'text-slate-600 bg-slate-800' : 'text-indigo-500 bg-indigo-500/10'}`}>P{step.n}</span>
+                <div className="min-w-0">
+                  <span className={`text-[11px] font-medium ${(step.n === 3 && swOpts.skipPhase3) || (step.n === 4 && swOpts.skipPhase4) ? 'text-slate-600 line-through' : 'text-slate-300'}`}>{step.label}</span>
+                  <span className="text-[10px] text-slate-600 ml-1 truncate">· {step.detail}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Phase 4 custom rule files */}
+          {!swOpts.skipPhase4 && (
+            <div className="rounded-lg border border-slate-800 bg-slate-950/30 px-3 py-2 space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">Phase 4 — Custom Rule Files</p>
+                <button
+                  onClick={() => setSwOpts(o => ({ ...o, phase4RulePaths: [...(o.phase4RulePaths || []), ''] }))}
+                  className="text-[9px] font-bold text-indigo-400 hover:text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20 rounded px-1.5 py-0.5 transition-colors"
+                >+ Add Rule</button>
+              </div>
+              {(!swOpts.phase4RulePaths || swOpts.phase4RulePaths.length === 0) && (
+                <p className="text-[9px] text-slate-600">No custom rules — only dynamic rule will run. Add rule files to run sequentially as extra passes.</p>
+              )}
+              {(swOpts.phase4RulePaths || []).map((rp, idx) => (
+                <div key={idx} className="flex gap-1.5 items-center">
+                  <span className="text-[9px] text-slate-600 font-mono shrink-0">#{idx + 1}</span>
+                  <input
+                    type="text"
+                    value={rp}
+                    onChange={e => setSwOpts(o => { const arr = [...(o.phase4RulePaths || [])]; arr[idx] = e.target.value; return { ...o, phase4RulePaths: arr }; })}
+                    placeholder="Path to .rule file..."
+                    className="flex-1 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-300 font-mono text-[10px] focus:border-indigo-500 outline-none min-w-0"
+                  />
+                  <button
+                    onClick={() => {
+                      const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.rule';
+                      inp.onchange = async (e: any) => {
+                        const f = e.target.files?.[0]; if (!f) return;
+                        const direct = (f as any).path;
+                        if (direct) { setSwOpts(o => { const arr = [...(o.phase4RulePaths || [])]; arr[idx] = direct; return { ...o, phase4RulePaths: arr }; }); return; }
+                        try {
+                          const fd = new FormData(); fd.append('file', f);
+                          const res = await fetch(`${getSocketUrl()}/api/upload`, { method: 'POST', body: fd });
+                          const d = await res.json();
+                          setSwOpts(o => { const arr = [...(o.phase4RulePaths || [])]; arr[idx] = d.path; return { ...o, phase4RulePaths: arr }; });
+                        } catch { alert('Failed to upload rule file.'); }
+                      };
+                      inp.click();
+                    }}
+                    className="shrink-0 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white border border-slate-700 rounded p-1 transition-colors"
+                    title="Browse"
+                  ><FolderOpen size={12} /></button>
+                  <button
+                    onClick={() => setSwOpts(o => { const arr = (o.phase4RulePaths || []).filter((_, i) => i !== idx); return { ...o, phase4RulePaths: arr }; })}
+                    className="shrink-0 text-slate-600 hover:text-red-400 transition-colors"
+                    title="Remove"
+                  ><X size={12} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Global settings inherited notice */}
+          <div className="rounded-lg border border-slate-800 bg-slate-950/30 px-3 py-2 flex items-start gap-2">
+            <Gauge size={11} className="text-slate-500 mt-0.5 shrink-0" />
+            <p className="text-[9px] text-slate-500 leading-relaxed">
+              Global settings (workload, devices, -O, --hwmon-disable, --force, --status-timer, etc.)
+              are inherited from the <span className="text-slate-400 font-bold">Config</span> tab automatically.
+            </p>
+          </div>
+
+          {/* Phase 3 settings toggle */}
+          <button
+            onClick={() => setSwAdvanced(v => !v)}
+            className="w-full flex items-center justify-between text-[10px] text-slate-500 hover:text-indigo-400 transition-colors px-1"
+          >
+            <span className="uppercase font-bold tracking-wider">Phase 3 Settings</span>
+            {swAdvanced ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          </button>
+
+          {swAdvanced && (
+            <div className="bg-slate-950/40 border border-slate-800 rounded-lg p-3 space-y-3">
+
+              {/* ── Time-budget mask selection (insights-style) ── */}
+              <div>
+                <label className="block text-[10px] font-bold text-indigo-400 uppercase mb-1.5 tracking-wider">
+                  Mask Time Budget
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number" min={0} step={0.5}
+                    value={swOpts.phase3TimeBudget}
+                    onChange={e => setSwOpts(o => ({ ...o, phase3TimeBudget: +e.target.value }))}
+                    className="flex-1 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 focus:border-indigo-500 outline-none"
+                    placeholder="0"
+                  />
+                  <select
+                    value={swOpts.phase3TimeUnit}
+                    onChange={e => setSwOpts(o => ({ ...o, phase3TimeUnit: e.target.value as 'minutes'|'hours'|'days' }))}
+                    className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 focus:border-indigo-500 outline-none"
+                  >
+                    <option value="minutes">min</option>
+                    <option value="hours">hr</option>
+                    <option value="days">day</option>
+                  </select>
+                </div>
+                {/* Hashrate source info */}
+                {(() => {
+                  const hr = sessionHashrate && sessionHashrate > 0 ? sessionHashrate : null;
+                  const budget = swOpts.phase3TimeBudget;
+                  const unit = swOpts.phase3TimeUnit;
+                  if (!hr && budget === 0) return (
+                    <p className="text-[9px] text-slate-600 mt-1">
+                      Set a time budget + run a session first to auto-detect hashrate. Falls back to max masks count.
+                    </p>
+                  );
+                  if (!hr) return (
+                    <p className="text-[9px] text-amber-600 mt-1">
+                      No live hashrate — budget will apply once a session provides speed data.
+                    </p>
+                  );
+                  const hrStr = hr < 1e3 ? `${hr.toFixed(0)} H/s` : hr < 1e6 ? `${(hr/1e3).toFixed(1)} KH/s` : `${(hr/1e6).toFixed(1)} MH/s`;
+                  return (
+                    <p className="text-[9px] text-indigo-400/70 mt-1 flex items-center gap-1">
+                      <Gauge size={9} />
+                      Auto-detected: {hrStr} — masks are pre-selected to fit within {budget} {unit}
+                    </p>
+                  );
+                })()}
+              </div>
+
+              {/* ── Sort strategy ── */}
+              <div>
+                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1.5">Mask Priority</label>
+                <div className="flex gap-1.5">
+                  {(['occurrence', 'efficiency'] as const).map(mode => (
+                    <button
+                      key={mode}
+                      onClick={() => setSwOpts(o => ({ ...o, phase3SortMode: mode }))}
+                      className={`flex-1 py-1.5 rounded text-[10px] font-bold uppercase tracking-wider transition-colors border ${
+                        swOpts.phase3SortMode === mode
+                          ? 'bg-indigo-600 text-white border-indigo-500'
+                          : 'bg-slate-900 text-slate-500 border-slate-700 hover:text-slate-300'
+                      }`}
+                    >
+                      {mode === 'occurrence' ? '# Occurrence' : '⚡ Efficiency'}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[9px] text-slate-600 mt-1">
+                  {swOpts.phase3SortMode === 'occurrence'
+                    ? 'Most common cracked patterns first — maximize hit rate early.'
+                    : 'Highest cracks-per-second-of-cracking first — maximize value per GPU cycle.'}
+                </p>
+              </div>
+
+              {/* ── Mask length bounds ── */}
+              <div>
+                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1.5">Mask Length Filter</label>
+                <div className="flex items-center gap-2">
+                  <div className="flex-1">
+                    <div className="text-[9px] text-slate-600 mb-1">Min len</div>
+                    <input type="number" min={1} max={32} value={swOpts.maskMinLen}
+                      onChange={e => setSwOpts(o => ({ ...o, maskMinLen: +e.target.value }))}
+                      className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 focus:border-indigo-500 outline-none" />
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-[9px] text-slate-600 mb-1">Max len</div>
+                    <input type="number" min={1} max={32} value={swOpts.maskMaxLen}
+                      onChange={e => setSwOpts(o => ({ ...o, maskMaxLen: +e.target.value }))}
+                      className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 focus:border-indigo-500 outline-none" />
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-[9px] text-slate-600 mb-1">Max masks</div>
+                    <input type="number" min={5} max={500} value={swOpts.maxMasks}
+                      onChange={e => setSwOpts(o => ({ ...o, maxMasks: +e.target.value }))}
+                      className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 focus:border-indigo-500 outline-none" />
+                  </div>
+                </div>
+                <p className="text-[9px] text-slate-600 mt-1">Max masks is used when no hashrate is available for time estimation.</p>
+              </div>
+
+              {/* ── Safety runtime cap ── */}
+              <div>
+                <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1.5">
+                  Hard Runtime Cap <span className="normal-case font-normal">(--runtime, 0 = off)</span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <input type="number" min={0} max={1440} value={swOpts.phase3Runtime}
+                    onChange={e => setSwOpts(o => ({ ...o, phase3Runtime: +e.target.value }))}
+                    className="flex-1 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 focus:border-indigo-500 outline-none" />
+                  <span className="text-[10px] text-slate-500 shrink-0">min</span>
+                </div>
+              </div>
+
+              {/* ── Toggles ── */}
+              <div className="space-y-2 pt-1 border-t border-slate-800">
+                {([
+                  { key: 'phase3Increment', label: 'Increment mode (Phase 3)', desc: '--increment: try all lengths from min to max' },
+                  { key: 'skipPhase3', label: 'Skip Phase 3 (mask attack)', desc: 'Useful when Phase 1 cracks very few passwords' },
+                  { key: 'skipPhase4', label: 'Skip Phase 4 (feedback rules)', desc: 'Skip mutation attack on cracked plaintexts' },
+                ] as { key: keyof SmartWorkflowOpts; label: string; desc: string }[]).map(({ key, label, desc }) => (
+                  <div key={key} className="flex items-center justify-between">
+                    <div>
+                      <div className="text-[11px] text-slate-300">{label}</div>
+                      <div className="text-[9px] text-slate-600">{desc}</div>
+                    </div>
+                    <button onClick={() => setSwOpts(o => ({ ...o, [key]: !o[key] }))} className="shrink-0 transition-colors">
+                      {swOpts[key]
+                        ? <ToggleRight size={20} className="text-indigo-400" />
+                        : <ToggleLeft size={20} className="text-slate-600" />}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="flex gap-2">
+            <button
+              onClick={() => onStartWorkflow && onStartWorkflow({ ...swOpts, rulePath: config.rulePath || '' })}
+              disabled={!onStartWorkflow || !config.wordlistPath}
+              className="flex-1 flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-white py-2.5 rounded-lg text-sm font-bold transition-colors shadow-lg shadow-indigo-500/20"
+            >
+              <Workflow size={15} />
+              Start
+            </button>
+            <button
+              onClick={() => onQueueWorkflow && onQueueWorkflow({ ...swOpts, rulePath: config.rulePath || '' })}
+              disabled={!onQueueWorkflow || !config.wordlistPath}
+              className="flex items-center justify-center gap-1.5 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800 disabled:text-slate-600 disabled:cursor-not-allowed text-slate-300 border border-slate-700 px-3 py-2.5 rounded-lg text-xs font-bold transition-colors"
+              title="Add Smart Workflow to queue"
+            >
+              <ListPlus size={14} />
+              Queue
+            </button>
+          </div>
+          {!config.wordlistPath && (
+            <p className="text-[10px] text-amber-500/70 text-center -mt-1">Select a wordlist in the General section first.</p>
+          )}
         </div>
       </div>
     </div>

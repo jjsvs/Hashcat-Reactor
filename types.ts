@@ -57,12 +57,30 @@ export interface LogEntry {
 }
 
 // Queue Interface
+export interface SmartWorkflowOpts {
+  rulePath: string;
+  maskMinLen: number;
+  maskMaxLen: number;
+  phase3Runtime: number;        // minutes — hard --runtime safety cap (0 = off)
+  phase3Increment: boolean;
+  optimizedKernel: boolean;
+  maxMasks: number;             // fallback cap when no time budget / hashrate
+  skipPhase3: boolean;
+  skipPhase4: boolean;
+  // Time-budget mask selection (insights-style)
+  phase3TimeBudget: number;     // raw value (0 = use maxMasks fallback)
+  phase3TimeUnit: 'minutes' | 'hours' | 'days';
+  phase3SortMode: 'occurrence' | 'efficiency'; // occurrence = most common first; efficiency = most cracks per second first
+  phase4RulePaths: string[];   // additional rule files to run sequentially in Phase 4
+}
+
 export interface QueueItem {
   id: string;
   config: HashcatConfig;
   status: 'PENDING' | 'RUNNING' | 'COMPLETED';
   addedAt: number;
   targetSummary: string;
+  workflowOpts?: SmartWorkflowOpts; // present if this is a Smart Workflow job
 }
 
 // Hashes.com Interfaces
