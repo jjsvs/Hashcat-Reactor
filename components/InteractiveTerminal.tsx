@@ -3,6 +3,7 @@ import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { Socket } from 'socket.io-client';
 import { Lock } from 'lucide-react'; // Import Lock icon
+import { useTranslation } from 'react-i18next';
 import 'xterm/css/xterm.css';
 
 interface InteractiveTerminalProps {
@@ -11,6 +12,7 @@ interface InteractiveTerminalProps {
 }
 
 const InteractiveTerminal: React.FC<InteractiveTerminalProps> = ({ socket, disabled = false }) => {
+  const { t } = useTranslation();
   const terminalContainerRef = useRef<HTMLDivElement>(null);
   const isInitialized = useRef(false);
   const xtermRef = useRef<Terminal | null>(null);
@@ -112,12 +114,12 @@ const InteractiveTerminal: React.FC<InteractiveTerminalProps> = ({ socket, disab
             <div className={`w-3 h-3 rounded-full ${disabled ? 'bg-red-500' : 'bg-slate-700'}`}></div>
             <div className={`w-3 h-3 rounded-full ${disabled ? 'bg-red-500' : 'bg-slate-700'}`}></div>
             <div className={`w-3 h-3 rounded-full ${disabled ? 'bg-red-500' : 'bg-slate-700'}`}></div>
-            <span className="ml-2 text-slate-400 text-xs font-mono font-bold">REACTOR SHELL ACCESS</span>
+            <span className="ml-2 text-slate-400 text-xs font-mono font-bold">{t('term_header')}</span>
         </div>
         <div className="flex items-center gap-2">
             <div className={`w-2 h-2 rounded-full ${disabled ? 'bg-red-500' : 'bg-emerald-500 animate-pulse'}`}></div>
             <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">
-                {disabled ? 'LOCKED' : 'INTERACTIVE'}
+                {disabled ? t('term_locked') : t('term_interactive')}
             </span>
         </div>
       </div>
@@ -132,12 +134,12 @@ const InteractiveTerminal: React.FC<InteractiveTerminalProps> = ({ socket, disab
                     <div className="w-12 h-12 bg-red-500/10 rounded-full flex items-center justify-center mb-4">
                         <Lock className="text-red-500" size={24} />
                     </div>
-                    <h3 className="text-slate-200 font-bold text-lg mb-2">Terminal Locked</h3>
+                    <h3 className="text-slate-200 font-bold text-lg mb-2">{t('term_lock_title')}</h3>
                     <p className="text-sm text-slate-500">
-                        A cracking session is currently active. Access is restricted to prevent GPU resource conflicts.
+                        {t('term_lock_desc')}
                     </p>
                     <div className="mt-4 px-3 py-1 bg-slate-950 rounded border border-slate-800 text-xs font-mono text-yellow-500">
-                        Stop session to unlock
+                        {t('term_unlock_hint')}
                     </div>
                 </div>
             </div>

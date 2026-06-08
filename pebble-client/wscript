@@ -1,0 +1,83 @@
+#
+# Hashcat Reactor - Pebble watchapp build script.
+#
+# Generated for Pebble SDK 4.9.127+ (Core Devices revival, WAF 2.1.4,
+# GCC 14 toolchain). The only non-default thing we do is suppress the
+# new GCC 14 warnings that the upstream SDK headers (and some of our
+# own struct-init shortcuts) trip over; everything else is the standard
+# template emitted by `pebble new-project`.
+#
+
+import os.path
+import sys
+
+top = '.'
+out = 'build'
+
+
+def options(ctx):
+    ctx.load('pebble_sdk')
+
+
+def configure(ctx):
+    ctx.load('pebble_sdk')
+    # New in 4.9.127: silence the chatty -Wstringop-truncation,
+    # -Wdangling-pointer, -Wcalloc-transposed-args, etc. that GCC 14
+    # emits against patterns the legacy SDK headers still use.
+    if hasattr(ctx, 'pbl_suppress_newer_gcc_warnings'):
+        ctx.pbl_suppress_newer_gcc_warnings()
+
+
+def _ensure_icons(ctx):
+    """Regenerate the Material Symbols outlined icons if missing or stale.
+    The icons live in resources/images/ic_*.png and are produced by
+    gen_icons.py. We re-run it whenever any source icon file is newer
+    than the generated PNGs."""
+    gen = ctx.path.find_resource('gen_icons.py')
+    out_dir = ctx.path.find_dir(['resources', 'images'])
+    if not gen or not out_dir:
+        return
+    out_pngs = out_dir.ant_glob('ic_*.png')
+    newest_src = max([gen.abspath()] +
+                     [p.abspath() for p in out_pngs], default=None)
+    if not out_pngs or any(os.path.getmtime(newest_src) >
+                           os.path.getmtime(p.abspath()) for p in out_pngs):
+        print('Regenerating Material icon PNGs...')
+        import subprocess
+        r = subprocess.run([sys.executable, 'gen_icons.py'],
+                           cwd=ctx.path.abspath())
+        if r.returncode != 0:
+            ctx.fatal('gen_icons.py failed')
+
+
+def build(ctx):
+    ctx.load('pebble_sdk')
+    _ensure_icons(ctx)
+
+    build_worker = os.path.exists('worker_src')
+    binaries = []
+
+    for p in ctx.env.TARGET_PLATFORMS:
+        ctx.set_env(ctx.all_envs[p])
+        ctx.set_group(ctx.env.PLATFORM_NAME)
+        app_elf = '{}/pebble-app.elf'.format(ctx.env.BUILD_DIR)
+        ctx.pbl_build(source=ctx.path.ant_glob('src/c/**/*.c'),
+                      target=app_elf,
+                      bin_type='app')
+
+        if build_worker:
+            worker_elf = '{}/pebble-worker.elf'.format(ctx.env.BUILD_DIR)
+            binaries.append({'platform': p,
+                             'app_elf': app_elf,
+                             'worker_elf': worker_elf})
+            ctx.pbl_build(source=ctx.path.ant_glob('worker_src/c/**/*.c'),
+                          target=worker_elf,
+                          bin_type='worker')
+        else:
+            binaries.append({'platform': p, 'app_elf': app_elf})
+
+    ctx.pbl_bundle(binaries=binaries,
+                   js=ctx.path.ant_glob(['src/pkjs/**/*.js',
+                                         'src/pkjs/**/*.json',
+                                         'src/common/**/*.js']),
+                   js_entry_file='src/pkjs/index.js')

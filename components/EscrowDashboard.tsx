@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { EscrowJob, EscrowAlgo, SessionStats } from '../types';
+import { EscrowJob, EscrowAlgo, SessionStats, LogEntry } from '../types';
 import { RefreshCw, Download, Search, UploadCloud, AlertTriangle, DollarSign, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Calendar, FileText, Filter, X, Loader2, Settings, Zap, Save, BrainCircuit, TrendingUp, BarChart3, Globe, PieChart } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -18,6 +18,8 @@ interface EscrowDashboardProps {
   onUpdateAutoUploadSettings: (settings: AutoUploadSettings) => void;
   sessions: Record<string, SessionStats>;
   activeSessionId: string | null;
+  addLog: (sessionId: string, message: string, level: 'INFO' | 'WARN' | 'ERROR' | 'SUCCESS' | 'CMD') => void;
+  onSetTarget?: (content: string, algoId?: number) => Promise<void>;
 }
 
 interface HistoryItem {
@@ -48,7 +50,9 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
   autoUploadSettings,
   onUpdateAutoUploadSettings,
   sessions,
-  activeSessionId
+  activeSessionId,
+  addLog,
+  onSetTarget
 }) => {
   const { t } = useTranslation();
   
@@ -710,7 +714,7 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
              }`}
            >
               <Zap size={16} className={autoUploadSettings.enabled ? "fill-current" : ""} />
-              {autoUploadSettings.enabled ? 'Auto-Upload' : 'Auto-Upload'}
+              {t('escrow_auto_btn')}
            </button>
 
            {/* View Filters */}
@@ -841,7 +845,7 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
                 <div className="p-4 bg-slate-950 border-b border-slate-800 flex justify-between items-center shrink-0">
                     <h3 className="text-white font-bold flex items-center gap-2">
                         <Zap size={18} className="text-amber-500"/>
-                        Auto-Upload Settings
+                        {t('escrow_auto_modal_title')}
                     </h3>
                     <button onClick={() => setShowAutoSettings(false)} className="text-slate-500 hover:text-white">
                         <X size={20}/>
@@ -849,12 +853,12 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
                 </div>
                 <div className="p-6 space-y-6">
                     <p className="text-xs text-slate-400 bg-slate-800/50 p-3 rounded border border-slate-800">
-                        When enabled, Reactor will automatically upload recovered hashes to Hashes.com whenever the count of new, unsent hashes reaches the threshold.
+                        {t('escrow_auto_desc')}
                     </p>
-                    
+
                     <div className="flex items-center justify-between">
-                         <label className="text-sm font-bold text-slate-200">Enable Auto-Upload</label>
-                         <button 
+                         <label className="text-sm font-bold text-slate-200">{t('escrow_auto_enable_label')}</label>
+                         <button
                             onClick={() => setTempAutoSettings(prev => ({ ...prev, enabled: !prev.enabled }))}
                             className={`w-12 h-6 rounded-full transition-colors relative ${tempAutoSettings.enabled ? 'bg-amber-500' : 'bg-slate-700'}`}
                          >
@@ -863,9 +867,9 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
                     </div>
 
                     <div>
-                        <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Upload Threshold (Hashes)</label>
-                        <input 
-                            type="number" 
+                        <label className="block text-xs font-bold text-slate-500 uppercase mb-2">{t('escrow_auto_threshold')}</label>
+                        <input
+                            type="number"
                             min="1"
                             value={tempAutoSettings.threshold}
                             onChange={(e) => setTempAutoSettings(prev => ({ ...prev, threshold: parseInt(e.target.value) || 10 }))}
@@ -877,9 +881,9 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
                     <div className="bg-emerald-950/30 p-3 rounded-lg border border-emerald-800/40 flex gap-3 items-start">
                         <Zap className="text-emerald-400 shrink-0 mt-0.5" size={18} />
                         <div>
-                            <h4 className="text-xs font-bold text-emerald-300 uppercase mb-1">Session-End Flush</h4>
+                            <h4 className="text-xs font-bold text-emerald-300 uppercase mb-1">{t('escrow_auto_flush_title')}</h4>
                             <p className="text-[11px] text-slate-400 leading-relaxed">
-                                When a session ends, any remaining unsent hashes will be automatically uploaded even if below the threshold. No hashes get left behind.
+                                {t('escrow_auto_flush_desc')}
                             </p>
                         </div>
                     </div>
@@ -887,18 +891,18 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
                     <div className="bg-slate-800 p-3 rounded-lg border border-slate-700 flex gap-3 items-start">
                         <BrainCircuit className="text-indigo-400 shrink-0 mt-0.5" size={18} />
                         <div>
-                            <h4 className="text-xs font-bold text-indigo-300 uppercase mb-1">Smart Detection</h4>
+                            <h4 className="text-xs font-bold text-indigo-300 uppercase mb-1">{t('escrow_auto_smart_title')}</h4>
                             <p className="text-[11px] text-slate-400 leading-relaxed">
-                                Reactor will automatically match the hash type of each running session (e.g., MD5, SHA256) to the correct Hashes.com algorithm ID. This allows you to run concurrent sessions with different hash types seamlessly.
+                                {t('escrow_auto_smart_desc')}
                             </p>
                         </div>
                     </div>
 
                     <div className="bg-slate-800/50 p-3 rounded border border-slate-700 text-[11px] text-slate-400 leading-relaxed">
-                      <span className="text-slate-300 font-bold">Note:</span> Session-end flush activity is logged in the session terminal under <code className="text-emerald-400">[SESSION-END FLUSH]</code> entries.
+                      <span className="text-slate-300 font-bold">{t('escrow_auto_note_label')}</span> {t('escrow_auto_note_desc')}
                     </div>
 
-                    <button 
+                    <button
                         onClick={() => {
                             onUpdateAutoUploadSettings(tempAutoSettings);
                             setShowAutoSettings(false);
@@ -906,7 +910,7 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
                         className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 transition-all"
                     >
                         <Save size={18} />
-                        Save Settings
+                        {t('escrow_auto_save')}
                     </button>
                 </div>
              </div>
@@ -973,15 +977,48 @@ const EscrowDashboard: React.FC<EscrowDashboardProps> = ({
                   </td>
                   <td className="p-4 text-right font-mono text-slate-400">{job.leftHashes.toLocaleString()}</td>
                   <td className="p-4 text-center">
-                     <a 
-                       href={`https://hashes.com${job.leftList}`} 
-                       target="_blank" 
-                       rel="noopener noreferrer"
-                       className="inline-block p-2 rounded-lg bg-slate-800 text-indigo-400 hover:text-white hover:bg-indigo-600 transition-all"
-                       title="Download List"
-                     >
-                       <Download size={16} />
-                     </a>
+                     <div className="flex items-center justify-center gap-1.5">
+                        <button
+                          onClick={async () => {
+                            if (!onSetTarget || !job.leftList) return;
+                            try {
+                              addLog('general', '[ESCROW] Downloading hash list from job...', 'INFO');
+                              
+                              // Normalize URL exactly like the mass download feature
+                              let cleanUrl = job.leftList;
+                              if (cleanUrl.startsWith('http:')) cleanUrl = cleanUrl.replace('http:', 'https:');
+                              else if (!cleanUrl.startsWith('http')) {
+                                if (!cleanUrl.startsWith('/')) cleanUrl = '/' + cleanUrl;
+                                cleanUrl = `https://hashes.com${cleanUrl}`;
+                              }
+                              
+                              const proxyUrl = `http://localhost:3001/api/escrow/proxy?url=${encodeURIComponent(cleanUrl)}`;
+                              const res = await fetch(proxyUrl);
+                              if (!res.ok) throw new Error(`Proxy HTTP ${res.status}`);
+                              const text = await res.text();
+                              if (text.trim().toLowerCase().startsWith('<!doctype') || text.includes('<html')) throw new Error('Invalid content from proxy');
+                              await onSetTarget(text.trim(), job.algorithmId);
+                            } catch (e: any) {
+                              addLog('general', `[ESCROW] Failed to set target: ${e.message}`, 'ERROR');
+                              console.error('Set as target failed:', e);
+                            }
+                          }}
+                          disabled={!onSetTarget || !job.leftList}
+                          className="inline-flex items-center justify-center p-2 rounded-lg bg-emerald-600/10 text-emerald-400 hover:bg-emerald-600/20 hover:text-emerald-300 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                          title="Set as Target"
+                        >
+                          <Zap size={16} />
+                        </button>
+                        <a 
+                          href={`https://hashes.com${job.leftList}`} 
+                          target="_blank" 
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center justify-center p-2 rounded-lg bg-slate-800 text-indigo-400 hover:text-white hover:bg-indigo-600 transition-all"
+                          title="Download List"
+                        >
+                          <Download size={16} />
+                        </a>
+                     </div>
                   </td>
                 </tr>
               ))}

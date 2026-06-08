@@ -218,6 +218,42 @@ if (staticPath && fs.existsSync(staticPath)) app.use(express.static(staticPath))
 const activeSessions = {}; 
 let sessionCounter = 0; 
 let currentGlobalPower = 0;
+let currentMaxTemp = 0;
+let currentGpus = [];   // [{ index, name, watts, temp }] from the latest poll
+
+// Per-session live stats the Pebble companion polls. These are populated
+// alongside the Socket.IO emissions so the watchapp can show the same
+// numbers without needing a Socket.IO connection.
+const liveStats = {}; // sessionId -> { timeEstimatedSec, hashrate, progressPercent, lastUpdated }
+
+function setLiveStat(sessionId, key, value) {
+    if (!sessionId) return;
+    if (!liveStats[sessionId]) liveStats[sessionId] = { timeEstimatedSec: 0, hashrate: 0, progressPercent: 0, lastUpdated: Date.now() };
+    liveStats[sessionId][key] = value;
+    liveStats[sessionId].lastUpdated = Date.now();
+}
+
+// Convert hashcat's "Time.Estimated" string into seconds.
+// Examples: "5d 12h", "1h 23m", "30 mins, 45 secs", "0 secs", "2 days, 3 hours".
+function parseHashcatTimeToSec(s) {
+    if (!s) return 0;
+    s = String(s).toLowerCase();
+    if (s.includes('remaining') || s === '0 secs' || s === '0 sec' || s === '0s') return 0;
+    let total = 0;
+    const re = /(\d+)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/g;
+    let m;
+    let matched = false;
+    while ((m = re.exec(s)) !== null) {
+        matched = true;
+        const v = parseInt(m[1], 10);
+        const u = m[2];
+        if (u.startsWith('d')) total += v * 86400;
+        else if (u.startsWith('h')) total += v * 3600;
+        else if (u.startsWith('m')) total += v * 60;
+        else if (u.startsWith('s')) total += v;
+    }
+    return matched ? total : 0;
+}
 
 const uuid = () => Math.random().toString(36).substring(2, 9);
 
@@ -284,6 +320,21 @@ const getFullPotfile = () => {
     } catch (e) { return []; }
 };
 
+// Rolling buffer of the most recently cracked plaintexts, surfaced to the
+// Pebble watch's RECOVERED card. Newest is pushed last; capped small.
+const recentPlains = [];
+function pushRecentPlain(plain) {
+    if (plain === undefined || plain === null || plain === '') return;
+    recentPlains.push(String(plain));
+    while (recentPlains.length > 8) recentPlains.shift();
+}
+
+// Recent plaintexts are per-run; once no session is active, clear them so the
+// Pebble RECOVERED card stops showing cracks from a finished session.
+function clearRecentPlainsIfIdle() {
+    if (Object.keys(activeSessions).length === 0) recentPlains.length = 0;
+}
+
 app.post('/api/upload', upload.single('file'), (req, res) => {
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
     res.json({ path: req.file.path });
@@ -301,6 +352,178 @@ app.post('/api/target', (req, res) => {
 });
 
 app.get('/api/remote/status', (req, res) => res.json(remoteConfig));
+
+// === PEBBLE WATCHAPP BRIDGE ===
+//
+// A read-only state endpoint polled by the Pebble companion (PebbleKit JS).
+// The watch itself is too constrained to subscribe to Socket.IO, and we want
+// to expose the same numbers the React UI sees, in a single JSON response.
+
+// hashcat mode -> algorithm name. Parsed once from the frontend's HASH_TYPES
+// list (the single source of truth) so the Pebble companion can show a real
+// algorithm name (e.g. "SHA2-256") instead of a bare mode number ("mode 1400")
+// when a session has no algorithmName set.
+const HASH_NAME_BY_ID = (() => {
+    // hash_names.json sits next to server.js and is shipped (extraResources copies
+    // the whole backend/ dir), so it resolves in packaged builds where the source
+    // constants.ts is not present. Regenerate it from constants.ts if hash modes
+    // change: node -e "...parse constants.ts -> backend/hash_names.json".
+    try {
+        const jsonPath = path.join(__dirname, 'hash_names.json');
+        if (fs.existsSync(jsonPath)) {
+            const map = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+            if (map && Object.keys(map).length > 0) {
+                console.log(`[PEBBLE] Loaded ${Object.keys(map).length} hash-type names from hash_names.json`);
+                return map;
+            }
+        }
+    } catch (e) { /* fall back to parsing constants.ts */ }
+
+    // Dev fallback: parse the source-of-truth constants.ts directly.
+    const candidates = [
+        path.join(__dirname, '..', 'constants.ts'),
+        path.join(process.cwd(), 'constants.ts'),
+        RESOURCES_PATH ? path.join(RESOURCES_PATH, 'constants.ts') : null,
+    ].filter(Boolean);
+    for (const file of candidates) {
+        try {
+            if (!fs.existsSync(file)) continue;
+            const txt = fs.readFileSync(file, 'utf-8');
+            const map = {};
+            const re = /id:\s*'([^']+)'\s*,\s*name:\s*'([^']*)'/g;
+            let m;
+            while ((m = re.exec(txt)) !== null) map[m[1]] = m[2];
+            if (Object.keys(map).length > 0) {
+                console.log(`[PEBBLE] Loaded ${Object.keys(map).length} hash-type names from ${path.basename(file)}`);
+                return map;
+            }
+        } catch (e) { /* try next candidate */ }
+    }
+    console.warn('[PEBBLE] Could not load HASH_TYPES names; Pebble will show mode numbers.');
+    return {};
+})();
+
+function resolveAlgoName(s) {
+    if (s.algorithmName) return s.algorithmName;
+    if (s.hashType == null) return null;
+    return HASH_NAME_BY_ID[String(s.hashType)] || ('mode ' + s.hashType);
+}
+
+// Cumulative session-history series for the Pebble INSIGHTS card. Mirrors the
+// web Insights "cumulativeGrowthData": walk completed sessions oldest->newest
+// accumulating recovered count and energy (Wh = powerUsage W * hours). Cost is
+// rate-dependent so it's derived on the phone (PKJS) from energyWh; here we
+// only emit the rate-free series. Capped to the most recent points.
+function getPebbleGrowth() {
+    let sessions = [];
+    if (fs.existsSync(SESSIONS_PATH)) {
+        try { sessions = JSON.parse(fs.readFileSync(SESSIONS_PATH, 'utf-8')); } catch (e) {}
+    }
+    sessions = (sessions || [])
+        .filter(s => s && s.date)
+        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    let rec = 0, wh = 0;
+    const recovered = [], energyWh = [];
+    sessions.forEach(s => {
+        rec += s.recovered || 0;
+        wh  += (s.powerUsage || 0) * ((s.duration || 0) / 3600);
+        recovered.push(rec);
+        energyWh.push(Math.round(wh));
+    });
+    const N = 48;
+    return { recovered: recovered.slice(-N), energyWh: energyWh.slice(-N) };
+}
+
+app.get('/api/pebble/state', (req, res) => {
+    const sessions = Object.entries(activeSessions).map(([id, s]) => {
+        const live = liveStats[id] || {};
+        const st = s.stats || {};
+        const speeds = st.latestSpeeds || {};
+        // Aggregate H/s: prefer the "*" device line if present, else sum numeric devices.
+        let aggregateHs = speeds['*'] || 0;
+        if (!aggregateHs) {
+            aggregateHs = Object.entries(speeds)
+                .filter(([k]) => !isNaN(parseInt(k)))
+                .reduce((acc, [, v]) => acc + v, 0);
+        }
+        const avgHs = st.hashrateCount > 0 ? (st.hashrateSum / st.hashrateCount) : 0;
+        const avgPwr = st.powerReadings > 0 ? (st.powerSum / st.powerReadings) : 0;
+        return {
+            id,
+            name: s.name,
+            type: s.type,
+            isWorkflow: !!s.isWorkflow,
+            startTime: s.startTime,
+            uptimeSec: s.startTime ? Math.floor((Date.now() - s.startTime) / 1000) : 0,
+            hashType: s.hashType || null,
+            attackMode: s.attackMode || null,
+            algorithmName: resolveAlgoName(s),
+            status: s.status || 'RUNNING',
+            stats: {
+                recovered: st.recovered || 0,
+                recoveredCount: st.recoveredCount || 0,
+                total: st.total || 0,
+            },
+            hashrate: aggregateHs,                       // H/s
+            avgHashrate: avgHs,                          // H/s
+            avgPower: avgPwr,                            // W
+            progressPercent: live.progressPercent || 0,  // 0-100 keyspace progress
+            timeEstimatedSec: live.timeEstimatedSec || 0,
+            lastUpdated: live.lastUpdated || 0,
+        };
+    });
+
+    res.json({
+        now: Date.now(),
+        sessions,
+        escrow: getEscrowStats(),
+        globalPower: currentGlobalPower,
+        maxTemp: currentMaxTemp,
+        gpus: currentGpus.map(g => ({ index: g.index, temp: Math.round(g.temp || 0) })),
+        recentPlains: recentPlains.slice(-3).reverse(), // newest first, up to 3
+        growth: getPebbleGrowth(),                      // cumulative history series
+    });
+});
+
+// Per-session escrow counters. Updated by the React UI via the
+// /api/pebble/escrow/record endpoint so the watchapp can show "submitted"
+// and running BTC totals without a second trip to hashes.com.
+const escrowStats = {}; // sessionId -> { submitted, btc, usd, lastSubmittedAt }
+
+function getEscrowStats() {
+    // Return a flat map plus a grand total.
+    let totalSubmitted = 0, totalBtc = 0, totalUsd = 0;
+    Object.values(escrowStats).forEach(e => {
+        totalSubmitted += e.submitted || 0;
+        totalBtc += e.btc || 0;
+        totalUsd += e.usd || 0;
+    });
+    return {
+        perSession: escrowStats,
+        totals: { submitted: totalSubmitted, btc: totalBtc, usd: totalUsd },
+    };
+}
+
+app.post('/api/pebble/escrow/record', (req, res) => {
+    const { sessionId, submitted, btc, usd } = req.body || {};
+    if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
+    if (!escrowStats[sessionId]) escrowStats[sessionId] = { submitted: 0, btc: 0, usd: 0, lastSubmittedAt: 0 };
+    if (typeof submitted === 'number') escrowStats[sessionId].submitted += submitted;
+    if (typeof btc === 'number') escrowStats[sessionId].btc += btc;
+    if (typeof usd === 'number') escrowStats[sessionId].usd += usd;
+    escrowStats[sessionId].lastSubmittedAt = Date.now();
+    res.json({ ok: true, escrow: escrowStats[sessionId] });
+});
+
+app.post('/api/pebble/escrow/clear', (req, res) => {
+    const { sessionId } = req.body || {};
+    if (sessionId) {
+        delete escrowStats[sessionId];
+    } else {
+        for (const k of Object.keys(escrowStats)) delete escrowStats[k];
+    }
+    res.json({ ok: true });
+});
 app.post('/api/remote/start', (req, res) => {
     const { username, password } = req.body;
     if (zrokProcess) return res.status(400).json({ message: 'Remote access already active' });
@@ -695,6 +918,11 @@ app.post('/api/session/start', (req, res) => {
 
   const friendlyName = `Session #${sessionCounter} (${config.hashType || 'Restore'})`;
   const sessionPotFile = path.join(uploadDir, `${sessionId}.potfile`);
+  // Sidecar log of cracks attributable to THIS session. Survives session exit
+  // (unlike sessionPotFile) so restore can re-emit the previously recovered
+  // hashes. The frontend's session_crack handler is already idempotent on
+  // hash value, so replaying is safe.
+  const sessionCrackFile = path.join(uploadDir, `${sessionId}.cracks`);
   let initialSize = 0;
   try {
       if (fs.existsSync(POTFILE_PATH)) {
@@ -702,7 +930,32 @@ app.post('/api/session/start', (req, res) => {
           initialSize = fs.statSync(sessionPotFile).size;
       } else { fs.writeFileSync(sessionPotFile, ''); }
   } catch (e) {}
-  
+
+  // On restore, prepare a replay of the sidecar so the frontend's recovered-
+  // hash list is repopulated from the previous run before any new cracks come
+  // in. The actual emit must happen AFTER session_started fires (the frontend
+  // drops session_crack events for a sessionId it doesn't have in state yet).
+  let replayCracksFn = null;
+  if (restore && fs.existsSync(sessionCrackFile)) {
+      replayCracksFn = () => {
+          try {
+              const lines = fs.readFileSync(sessionCrackFile, 'utf-8').split(/\r?\n/);
+              let replayed = 0;
+              lines.forEach(line => {
+                  const parsed = parsePotfileLine(line);
+                  if (parsed) {
+                      io.emit('session_crack', { sessionId, hash: parsed.hash, plain: parsed.plain });
+                      replayed++;
+                  }
+              });
+              if (replayed > 0) {
+                  io.emit('log', { sessionId, level: 'INFO', message: `[Restore] Replayed ${replayed} previously recovered hash${replayed === 1 ? '' : 'es'}.` });
+              }
+          } catch (e) { console.error(`Error replaying cracks for ${sessionId}`, e); }
+      };
+  }
+
+
   let args = [];
   if (restore) {
     args.push('--restore', '--status', '--status-timer', (config.statusTimer || 3).toString());
@@ -768,8 +1021,11 @@ app.post('/api/session/start', (req, res) => {
                       const parsed = parsePotfileLine(line);
                       if (parsed) {
                           io.emit('session_crack', { sessionId, hash: parsed.hash, plain: parsed.plain });
+                          pushRecentPlain(parsed.plain);
                           if (activeSessions[sessionId]) activeSessions[sessionId].stats.recoveredCount++;
                           try { fs.appendFileSync(POTFILE_PATH, line + '\n'); } catch (e) { }
+                          // Sidecar so restore can replay this crack later.
+                          try { fs.appendFileSync(sessionCrackFile, line + '\n'); } catch (e) { }
                       }
                   });
               });
@@ -817,12 +1073,14 @@ app.post('/api/session/start', (req, res) => {
                     const knownDevices = Object.keys(activeSessions[sessionId].stats.latestSpeeds);
                     const isAggregate = deviceId === '*' || (knownDevices.length === 1 && deviceId === '1');
                     io.emit('stats_update', { sessionId, type: 'hashrate', value: hashrate, isAggregate });
+                    if (isAggregate && hashrate > 0) setLiveStat(sessionId, 'hashrate', hashrate);
                 }
             }
             const progressRegex = /Progress.*?:\s+\d+\/\d+\s+\(([\d\.]+)%\)/i;
             const progMatch = trimmedLine.match(progressRegex);
             if (progMatch) {
                 io.emit('stats_update', { sessionId, type: 'progress', value: parseFloat(progMatch[1]) });
+                setLiveStat(sessionId, 'progressPercent', parseFloat(progMatch[1]));
                 if (activeSessions[sessionId]) {
                     const s = activeSessions[sessionId].stats;
                     const speeds = s.latestSpeeds;
@@ -840,6 +1098,7 @@ app.post('/api/session/start', (req, res) => {
                 const parenMatch = fullTimeStr.match(/\((.*?)\)/);
                 const value = parenMatch ? parenMatch[1] : fullTimeStr;
                 io.emit('stats_update', { sessionId, type: 'time_estimated', value: value });
+                setLiveStat(sessionId, 'timeEstimatedSec', parseHashcatTimeToSec(value));
             }
             const recoveredRegex = /Recovered.*?:\s+(\d+)\/(\d+)/i;
             const recMatch = trimmedLine.match(recoveredRegex);
@@ -882,6 +1141,8 @@ app.post('/api/session/start', (req, res) => {
       fs.unwatchFile(sessionPotFile);
       if (fs.existsSync(sessionPotFile)) { try { fs.unlinkSync(sessionPotFile); } catch(e) {} }
       if(activeSessions[sessionId]) delete activeSessions[sessionId];
+      delete liveStats[sessionId];
+      clearRecentPlainsIfIdle();
   };
 
   try {
@@ -910,18 +1171,27 @@ app.post('/api/session/start', (req, res) => {
         child.on('close', handleProcessExit);
     }
 
-    activeSessions[sessionId] = { 
-        process: child, 
+    activeSessions[sessionId] = {
+        process: child,
         type: type,
-        startTime: Date.now(), 
-        name: friendlyName, 
+        startTime: Date.now(),
+        name: friendlyName,
         potFile: sessionPotFile,
+        hashType: config.hashType,
+        attackMode: config.attackMode,
+        algorithmName: null,
+        status: 'RUNNING',
+        isWorkflow: false,
         stats: { recovered: 0, recoveredCount: 0, total: 0, hashrateSum: 0, hashrateCount: 0, latestSpeeds: {}, powerSum: 0, powerReadings: 0 }
     };
 
     io.emit('session_started', { sessionId, name: friendlyName, target: targetPath ? path.basename(targetPath) : 'Manual Input', hashType: config.hashType, attackMode: config.attackMode });
     io.emit('session_status', { sessionId, status: 'RUNNING' });
     io.emit('log', { sessionId, level: 'CMD', message: `[${friendlyName}] Started via ${type}` });
+    // Replay previously recovered hashes for restored sessions. Must run after
+    // session_started so the frontend has a sessions[sessionId] entry to merge
+    // session_crack events into.
+    if (replayCracksFn) replayCracksFn();
     
     if (type === 'spawn') {
         child.on('error', (err) => {
@@ -929,6 +1199,7 @@ app.post('/api/session/start', (req, res) => {
             io.emit('session_status', { sessionId, status: 'ERROR' });
             fs.unwatchFile(sessionPotFile);
             if(activeSessions[sessionId]) delete activeSessions[sessionId];
+            delete liveStats[sessionId];
         });
     }
 
@@ -957,6 +1228,7 @@ const parseAndEmitStats = (line, sessionId) => {
         else if (unit === 'mh/s') h *= 1000000;
         else if (unit === 'gh/s') h *= 1000000000;
         io.emit('stats_update', { sessionId, type: 'hashrate', value: h, isAggregate: speedMatch[1] === '*' });
+        if (speedMatch[1] === '*' && h > 0) setLiveStat(sessionId, 'hashrate', h);
         if (activeSessions[sessionId]) {
             const st = activeSessions[sessionId].stats;
             if (!st.latestSpeeds) st.latestSpeeds = {};
@@ -968,6 +1240,7 @@ const parseAndEmitStats = (line, sessionId) => {
     const progMatch = line.match(/Progress.*?:\s+\d+\/\d+\s+\(([\d\.]+)%\)/i);
     if (progMatch) {
         io.emit('stats_update', { sessionId, type: 'progress', value: parseFloat(progMatch[1]) });
+        setLiveStat(sessionId, 'progressPercent', parseFloat(progMatch[1]));
         if (activeSessions[sessionId]) {
             const st = activeSessions[sessionId].stats;
             const speeds = st.latestSpeeds || {};
@@ -981,7 +1254,9 @@ const parseAndEmitStats = (line, sessionId) => {
     const timeMatch = line.match(/Time\.Estimated.*?:\s+(.*)/i);
     if (timeMatch) {
         const pm = timeMatch[1].match(/\((.*?)\)/);
-        io.emit('stats_update', { sessionId, type: 'time_estimated', value: pm ? pm[1] : timeMatch[1] });
+        const value = pm ? pm[1] : timeMatch[1];
+        io.emit('stats_update', { sessionId, type: 'time_estimated', value });
+        setLiveStat(sessionId, 'timeEstimatedSec', parseHashcatTimeToSec(value));
     }
     const recMatch = line.match(/Recovered.*?:\s+(\d+)\/(\d+)/i);
     if (recMatch) {
@@ -1321,6 +1596,10 @@ app.post('/api/smart-workflow/start', (req, res) => {
                     startTime: activeSessions[workflowId]?.startTime || Date.now(),
                     name: `Smart Workflow (${hashType})`,
                     potFile: sessionPotFile,
+                    hashType: hashType,
+                    attackMode: 0,
+                    algorithmName: null,
+                    status: 'RUNNING',
                     isWorkflow: true,
                     stats: prevStats,
                 };
@@ -1582,7 +1861,9 @@ app.post('/api/smart-workflow/start', (req, res) => {
         } finally {
             fs.unwatchFile(sessionPotFile);
             if (activeSessions[workflowId]) delete activeSessions[workflowId];
+            delete liveStats[workflowId];
             if (activeWorkflows[workflowId]) delete activeWorkflows[workflowId];
+            clearRecentPlainsIfIdle();
             tempFiles.forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch(e) {} });
         }
     })();
@@ -1636,13 +1917,18 @@ app.post('/api/session/delete', (req, res) => {
        try {
            if (s.type === 'pty') s.process.kill();
            else s.process.kill('SIGKILL');
-       } catch(e) {}
-       if (!s.isWorkflow) delete activeSessions[sessionId];
+        } catch(e) {}
+        if (!s.isWorkflow) delete activeSessions[sessionId];
+        delete liveStats[sessionId];
     }
 
-    // Delete session potfile
+    // Delete session potfile and the cracks-replay sidecar (the latter survives
+    // session exit so /api/session/start --restore can replay it; explicit
+    // deletion is the only path that should remove it).
     const sessionPot = path.join(uploadDir, `${sessionId}.potfile`);
     if (fs.existsSync(sessionPot)) { try { fs.unlinkSync(sessionPot); } catch(e) {} }
+    const sessionCracks = path.join(uploadDir, `${sessionId}.cracks`);
+    if (fs.existsSync(sessionCracks)) { try { fs.unlinkSync(sessionCracks); } catch(e) {} }
 
     // Delete workflow temp files (covers orphans from crashes or sessions already completed)
     const workflowTempFiles = [
@@ -1756,6 +2042,8 @@ const pollGpuStats = () => {
             }
         });
         currentGlobalPower = totalWatts;
+        currentMaxTemp = maxTemp;
+        currentGpus = gpus;
         const activeIds = Object.keys(activeSessions);
         if (activeIds.length > 0 && totalWatts > 0) {
             activeIds.forEach(id => {
@@ -1805,6 +2093,20 @@ app.get('/api/smart-workflow/masks/:workflowId', (req, res) => {
     const filePath = path.join(uploadDir, `${workflowId}_all.hcmask`);
     if (!fs.existsSync(filePath)) return res.status(404).send('Mask file not found');
     res.download(filePath, `masks_${workflowId}.hcmask`);
+});
+
+app.get('/pebble-config', (req, res) => {
+    // Serve the Pebble Time 2 watchapp configuration page. Lives next to
+    // the backend in dev, and is bundled with the Electron extraResources
+    // in production.
+    const candidates = [
+        path.join(__dirname, '..', 'pebble-client', 'config', 'index.html'),
+        path.join(RESOURCES_PATH || '', 'pebble-client', 'config', 'index.html'),
+    ];
+    for (const p of candidates) {
+        if (p && fs.existsSync(p)) return res.sendFile(p);
+    }
+    res.status(404).send('Pebble config page not found. Build pebble-client first.');
 });
 
 app.get('*', (req, res) => {

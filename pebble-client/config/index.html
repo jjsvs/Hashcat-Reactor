@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Hashcat Reactor - Pebble Config</title>
+<style>
+  :root {
+    --bg:        #0a0d12;
+    --panel:     #121821;
+    --panel-2:   #1a2230;
+    --border:    #243044;
+    --fg:        #e6edf6;
+    --muted:     #8a98ac;
+    --accent:    #ffb000;
+    --accent-2:  #2cd5c4;
+    --danger:    #ff5a5a;
+    --ok:        #5ce17a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg);
+               font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { min-height: 100vh; padding: 24px 16px 96px; }
+  h1 { font-size: 18px; margin: 0 0 4px; letter-spacing: 0.05em; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+          padding: 16px; margin-bottom: 16px; }
+  .card h2 { font-size: 13px; margin: 0 0 12px; letter-spacing: 0.08em;
+             color: var(--accent); text-transform: uppercase; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
+  input { width: 100%; background: var(--panel-2); color: var(--fg); border: 1px solid var(--border);
+          border-radius: 6px; padding: 10px 12px; font: inherit; outline: none; }
+  input:focus { border-color: var(--accent); }
+  .row { display: flex; gap: 12px; }
+  .row > div { flex: 1; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .actions { position: fixed; left: 0; right: 0; bottom: 0;
+             padding: 12px 16px env(safe-area-inset-bottom, 12px);
+             background: linear-gradient(180deg, rgba(10,13,18,0), rgba(10,13,18,0.92) 30%, rgba(10,13,18,1));
+             display: flex; gap: 12px; }
+  button { flex: 1; border: 0; border-radius: 8px; padding: 14px 18px; font: inherit;
+           font-weight: 600; cursor: pointer; }
+  button.primary { background: var(--accent); color: #1a1a1a; }
+  button.ghost   { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  .status { font-size: 12px; margin-top: 8px; min-height: 14px; }
+  .status.ok    { color: var(--ok); }
+  .status.err   { color: var(--danger); }
+  .status.busy  { color: var(--muted); }
+  .preset { display: inline-block; margin: 4px 4px 0 0; padding: 4px 8px;
+            background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px;
+            font-size: 12px; color: var(--fg); cursor: pointer; }
+  .preset:hover { border-color: var(--accent); }
+</style>
+</head>
+<body>
+
+<h1>HASHCAT REACTOR</h1>
+<div class="sub">Pebble Time 2 companion settings</div>
+
+<div class="card">
+  <h2>Backend</h2>
+  <label for="backend">Bridge URL</label>
+  <input id="backend" type="url" inputmode="url" autocomplete="off"
+         spellcheck="false" placeholder="http://192.168.1.42:3001">
+  <div class="hint">
+    Where your Hashcat Reactor desktop bridge is listening.
+    Use <code>http://localhost:3001</code> when running the Pebble emulator on the same PC.
+    For real watch use, expose the bridge over your LAN or a tunnel like
+    <code>zrok</code> (see the desktop app's Remote Access panel).
+  </div>
+  <div style="margin-top: 8px;">
+    <span class="preset" data-url="http://localhost:3001">localhost:3001</span>
+    <span class="preset" data-url="http://192.168.1.1:3001">LAN:3001</span>
+  </div>
+
+  <button type="button" id="test" class="ghost" style="margin-top: 12px; padding: 8px;">
+    Test connection
+  </button>
+  <div id="status" class="status"></div>
+</div>
+
+<div class="card">
+  <h2>Refresh</h2>
+  <label for="interval">Poll interval (seconds)</label>
+  <input id="interval" type="number" min="2" max="600" step="1" value="10">
+  <div class="hint">How often the phone fetches new stats from the bridge.
+    Lower = fresher, higher = less battery drain on the phone.</div>
+</div>
+
+<div class="card">
+  <h2>Auth (optional)</h2>
+  <div class="row">
+    <div>
+      <label for="user">Username</label>
+      <input id="user" type="text" autocomplete="username" spellcheck="false">
+    </div>
+    <div>
+      <label for="pass">Password</label>
+      <input id="pass" type="password" autocomplete="current-password">
+    </div>
+  </div>
+  <div class="hint">Only needed if you protected the bridge with HTTP Basic auth
+    (e.g. via zrok's <code>--basic-auth</code> flag).</div>
+</div>
+
+<div class="actions">
+  <button type="button" class="ghost"   id="cancel">Cancel</button>
+  <button type="button" class="primary" id="save">Save</button>
+</div>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+
+  function getQuery() {
+    var q = {};
+    var s = location.search.replace(/^\?/, '');
+    if (!s) return q;
+    s.split('&').forEach(function (pair) {
+      var kv = pair.split('=');
+      q[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1] || '');
+    });
+    return q;
+  }
+
+  function setStatus(text, cls) {
+    var el = $('status');
+    el.textContent = text || '';
+    el.className   = 'status ' + (cls || '');
+  }
+
+  // Pre-fill from query string (passed in by PKJS on showConfiguration).
+  var q = getQuery();
+  $('backend').value  = q.backend  || 'http://localhost:3001';
+  $('interval').value = q.interval ? Math.max(2, Math.round(parseInt(q.interval, 10) / 1000)) : 10;
+  $('user').value     = q.user || '';
+  $('pass').value     = q.pass || '';
+
+  // Preset chips.
+  Array.prototype.forEach.call(document.querySelectorAll('.preset'), function (chip) {
+    chip.addEventListener('click', function () {
+      $('backend').value = chip.getAttribute('data-url');
+    });
+  });
+
+  // Test connection.
+  $('test').addEventListener('click', function () {
+    var url = $('backend').value.replace(/\/$/, '') + '/api/pebble/state';
+    setStatus('Testing ' + url + ' ...', 'busy');
+    var xhr = new XMLHttpRequest();
+    xhr.timeout = 6000;
+    xhr.open('GET', url, true);
+    var user = $('user').value, pass = $('pass').value;
+    if (user || pass) xhr.setRequestHeader('Authorization', 'Basic ' + btoa(user + ':' + pass));
+    xhr.onload = function () {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          var json = JSON.parse(xhr.responseText);
+          setStatus('OK - ' + (json.sessions ? json.sessions.length : 0) +
+                    ' session(s), bridge time ' + new Date(json.now).toLocaleTimeString(), 'ok');
+        } catch (e) {
+          setStatus('Reachable, but invalid JSON: ' + e.message, 'err');
+        }
+      } else {
+        setStatus('HTTP ' + xhr.status, 'err');
+      }
+    };
+    xhr.onerror   = function () { setStatus('Network error', 'err'); };
+    xhr.ontimeout = function () { setStatus('Timed out', 'err'); };
+    try { xhr.send(); } catch (e) { setStatus(e.message, 'err'); }
+  });
+
+  function close(payload) {
+    // Pebble closes the configuration view when we navigate to this URL.
+    var s = payload ? JSON.stringify(payload) : '';
+    location.href = 'pebblejs://close#' + encodeURIComponent(s);
+  }
+
+  $('cancel').addEventListener('click', function () { close(null); });
+
+  $('save').addEventListener('click', function () {
+    var backendRaw = $('backend').value.trim();
+    if (!/^https?:\/\//i.test(backendRaw)) {
+      setStatus('Backend URL must start with http:// or https://', 'err');
+      return;
+    }
+    var intervalSec = parseInt($('interval').value, 10);
+    if (isNaN(intervalSec) || intervalSec < 2) intervalSec = 10;
+    if (intervalSec > 600) intervalSec = 600;
+
+    close({
+      backend:  backendRaw.replace(/\/$/, ''),
+      interval: intervalSec * 1000,
+      user:     $('user').value,
+      pass:     $('pass').value
+    });
+  });
+})();
+</script>
+
+</body>
+</html>

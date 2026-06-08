@@ -1,6 +1,6 @@
 {
   "name": "hashcat-reactor",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Hashcat Reactor GUI",
   "main": "electron.js",
   "scripts": {
@@ -56,6 +56,13 @@
       {
         "from": "backend",
         "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "pebble-client/config",
+        "to": "pebble-client/config",
         "filter": [
           "**/*"
         ]

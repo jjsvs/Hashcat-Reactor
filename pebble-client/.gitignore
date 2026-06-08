@@ -1,0 +1,13 @@
+# Pebble build output
+/build/
+*.pbw
+
+# pebble-tool / SDK cache and settings
+/.lock-waf*
+/.pebble-cache/
+/settings.json
+
+# Editor / OS junk
+*.swp
+.DS_Store
+Thumbs.db

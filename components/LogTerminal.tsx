@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { LogEntry, SessionStats, SessionStatus } from '../types';
 import { Terminal, Plus, Activity, Power, Trash2 } from 'lucide-react';
@@ -16,11 +16,48 @@ interface LogTerminalProps {
 
 const LogTerminal = React.memo<LogTerminalProps>(({ logs, sessions, activeSessionId, onSelectSession, onDeleteSession }) => {
   const { t } = useTranslation();
-  const endRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
+  // Always pin to the bottom — no "sticky" heuristic. The previous version
+  // disabled autoscroll if the user appeared to scroll up, but reflow,
+  // subpixel rounding from our own programmatic scroll, and content-height
+  // changes from log retention pruning could all flip the flag off and
+  // silently break follow. The user-facing requirement is "always show the
+  // latest info," so this just always scrolls.
+  const pinToBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, []);
+
+  // useLayoutEffect runs synchronously after DOM mutations and before paint,
+  // so the user never sees an un-scrolled frame. The double-rAF handles edge
+  // cases where layout isn't fully settled at commit (e.g. font loads, lazy
+  // image-like elements, scrollbar-induced reflow).
+  useLayoutEffect(() => {
+    pinToBottom();
+    const r1 = requestAnimationFrame(() => {
+      pinToBottom();
+      const r2 = requestAnimationFrame(pinToBottom);
+      (pinToBottom as any)._r2 = r2;
+    });
+    return () => {
+      cancelAnimationFrame(r1);
+      const r2 = (pinToBottom as any)._r2;
+      if (r2) cancelAnimationFrame(r2);
+    };
+  }, [logs, activeSessionId, pinToBottom]);
+
+  // Re-pin when the container itself resizes (window resize, panel split
+  // adjustment, devtools opened, etc.). Without this the bottom drifts above
+  // the viewport on resize and never recovers until the next log arrives.
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [logs, activeSessionId]);
+    const el = scrollRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => pinToBottom());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [pinToBottom]);
 
   return (
     <div className="flex h-full bg-slate-950 border border-slate-800 rounded-xl overflow-hidden shadow-inner min-h-0">
@@ -93,7 +130,10 @@ const LogTerminal = React.memo<LogTerminalProps>(({ logs, sessions, activeSessio
             </span>
         </div>
 
-        <div className="flex-1 p-4 overflow-y-auto space-y-1 font-mono text-xs md:text-sm">
+        <div
+            ref={scrollRef}
+            className="flex-1 p-4 overflow-y-auto space-y-1 font-mono text-xs md:text-sm"
+        >
             {(!logs || logs.length === 0) ? (
                 <div className="text-slate-600 italic">{t('log_waiting')}</div>
             ) : (
@@ -113,7 +153,6 @@ const LogTerminal = React.memo<LogTerminalProps>(({ logs, sessions, activeSessio
                   </div>
                 ))
             )}
-            <div ref={endRef} />
         </div>
       </div>
     </div>

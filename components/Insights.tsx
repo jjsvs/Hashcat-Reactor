@@ -2142,33 +2142,33 @@ const Insights: React.FC<InsightsProps> = ({
                         {/* Semantic Patterns */}
                         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
                             <div className="flex items-center justify-between mb-4">
-                                <div className="flex items-center gap-2"><Activity size={18} className="text-orange-400"/><h3 className="font-bold text-slate-200">Semantic Analysis</h3></div>
+                                <div className="flex items-center gap-2"><Activity size={18} className="text-orange-400"/><h3 className="font-bold text-slate-200">{t('insights_semantic_title')}</h3></div>
                                 <div className="flex gap-1">
                                     {insights.total > 0 && (
                                         <>
-                                            <button 
+                                            <button
                                                 onClick={handleGenerateSemanticMasks}
                                                 className="text-[10px] flex items-center gap-1 bg-indigo-900/20 hover:bg-indigo-600 text-indigo-400 hover:text-white px-2 py-1 rounded border border-indigo-500/30 transition-colors"
-                                                title="Generate Hybrid Masks (.hcmask) for detected dates/years"
+                                                title={t('insights_gen_masks_tip')}
                                             >
-                                                <Calculator size={10} /> Generate Masks
+                                                <Calculator size={10} /> {t('insights_gen_masks_btn')}
                                             </button>
-                                            <button 
+                                            <button
                                                 onClick={handleGenerateSemanticRules}
                                                 className="text-[10px] flex items-center gap-1 bg-orange-900/20 hover:bg-orange-600 text-orange-400 hover:text-white px-2 py-1 rounded border border-orange-500/30 transition-colors"
-                                                title="Generate Rules (.rule) for detected patterns"
+                                                title={t('insights_gen_rules_tip')}
                                             >
-                                                <FileDown size={10} /> Generate Rules
+                                                <FileDown size={10} /> {t('insights_gen_rules_btn')}
                                             </button>
                                         </>
                                     )}
                                 </div>
                             </div>
-                            
+
                             <div className="grid grid-cols-2 gap-4">
                                 {/* Date Patterns */}
                                 <div className="col-span-2 md:col-span-1">
-                                    <div className="text-[10px] text-slate-500 uppercase font-bold mb-2 flex items-center gap-1"><Calendar size={10} /> Full Date Patterns</div>
+                                    <div className="text-[10px] text-slate-500 uppercase font-bold mb-2 flex items-center gap-1"><Calendar size={10} /> {t('insights_date_patterns')}</div>
                                     <div className="flex flex-wrap gap-1.5">
                                         {insights.datePatterns && insights.datePatterns.length > 0 ? (
                                             insights.datePatterns.slice(0, 5).map(([date, count]) => (
@@ -2177,14 +2177,14 @@ const Insights: React.FC<InsightsProps> = ({
                                                 </span>
                                             ))
                                         ) : (
-                                            <span className="text-xs text-slate-600 italic">No full dates found.</span>
+                                            <span className="text-xs text-slate-600 italic">{t('insights_no_dates')}</span>
                                         )}
                                     </div>
                                 </div>
-                                
+
                                 {/* Year Patterns */}
                                 <div className="col-span-2 md:col-span-1">
-                                    <div className="text-[10px] text-slate-500 uppercase font-bold mb-2 flex items-center gap-1"><Clock size={10} /> Years Detected</div>
+                                    <div className="text-[10px] text-slate-500 uppercase font-bold mb-2 flex items-center gap-1"><Clock size={10} /> {t('insights_years_detected')}</div>
                                     <div className="flex flex-wrap gap-1.5">
                                         {insights.yearPatterns && insights.yearPatterns.length > 0 ? (
                                             insights.yearPatterns.slice(0, 5).map(([year, count]) => (
@@ -2193,14 +2193,14 @@ const Insights: React.FC<InsightsProps> = ({
                                                 </span>
                                             ))
                                         ) : (
-                                            <span className="text-xs text-slate-600 italic">No years found.</span>
+                                            <span className="text-xs text-slate-600 italic">{t('insights_no_years')}</span>
                                         )}
                                     </div>
                                 </div>
 
                                 {/* Delimiters */}
                                 <div className="col-span-2 md:col-span-1">
-                                    <div className="text-[10px] text-slate-500 uppercase font-bold mb-2 flex items-center gap-1"><Minus size={10} /> Delimiters</div>
+                                    <div className="text-[10px] text-slate-500 uppercase font-bold mb-2 flex items-center gap-1"><Minus size={10} /> {t('insights_delimiters')}</div>
                                     <div className="flex flex-wrap gap-1.5">
                                         {insights.delimiters && insights.delimiters.length > 0 ? (
                                             insights.delimiters.slice(0, 5).map(([delim, count]) => (
@@ -2209,14 +2209,14 @@ const Insights: React.FC<InsightsProps> = ({
                                                 </span>
                                             ))
                                         ) : (
-                                            <span className="text-xs text-slate-600 italic">No delimiters found.</span>
+                                            <span className="text-xs text-slate-600 italic">{t('insights_no_delimiters')}</span>
                                         )}
                                     </div>
                                 </div>
 
                                 {/* Leetspeak */}
                                 <div className="col-span-2 md:col-span-1">
-                                    <div className="text-[10px] text-slate-500 uppercase font-bold mb-2 flex items-center gap-1"><Hash size={10} /> Leetspeak Patterns</div>
+                                    <div className="text-[10px] text-slate-500 uppercase font-bold mb-2 flex items-center gap-1"><Hash size={10} /> {t('insights_leetspeak')}</div>
                                     <div className="flex flex-wrap gap-1.5">
                                          {insights.leetspeak.slice(0, 5).map(([l,c]) => (
                                             <span key={l} className="text-[10px] bg-orange-900/20 text-orange-400 px-1.5 rounded border border-orange-800/30">{l} ({c})</span>
@@ -2228,8 +2228,8 @@ const Insights: React.FC<InsightsProps> = ({
 
                         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
                             <div className="flex items-center justify-between mb-4"><div className="flex items-center gap-2"><FileText size={18} className="text-amber-400"/><h3 className="font-bold text-slate-200">{t('insights_top_basewords')}</h3></div><button onClick={() => handleExportList('basewords', insights.topBaseWords)} className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-amber-400/10 rounded transition-colors"><Download size={14} /></button></div>
-                            <div className="mb-2 text-xs text-slate-500 italic px-1">Detected Recurring Words (Names, Places, Seasons, etc.)</div>
-                            <div className="space-y-2">{(insights.topBaseWords && insights.topBaseWords.length > 0) ? (insights.topBaseWords.slice(0, 10).map(([word, count], i) => (<div key={i} className="flex justify-between text-xs border-b border-slate-800/50 pb-1 last:border-0"><span className="text-slate-300 font-mono truncate max-w-[150px]" title={word}>{word}</span><span className="text-slate-500">{count}</span></div>))) : <div className="text-xs text-slate-600 italic">No base words detected.</div>}</div>
+                            <div className="mb-2 text-xs text-slate-500 italic px-1">{t('insights_basewords_desc')}</div>
+                            <div className="space-y-2">{(insights.topBaseWords && insights.topBaseWords.length > 0) ? (insights.topBaseWords.slice(0, 10).map(([word, count], i) => (<div key={i} className="flex justify-between text-xs border-b border-slate-800/50 pb-1 last:border-0"><span className="text-slate-300 font-mono truncate max-w-[150px]" title={word}>{word}</span><span className="text-slate-500">{count}</span></div>))) : <div className="text-xs text-slate-600 italic">{t('insights_no_basewords')}</div>}</div>
                         </div>
                         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 flex flex-col h-64">
                             <div className="flex items-center gap-2 mb-4 shrink-0"><BarChart3 size={18} className="text-blue-400"/><h3 className="font-bold text-slate-200">{t('insights_length_dist')}</h3></div>
@@ -2247,7 +2247,7 @@ const Insights: React.FC<InsightsProps> = ({
                                             const h = count > 0 ? Math.max((count / maxCount) * 100, 10) : 2;
                                             return (<div key={len} className="flex flex-col items-center group relative h-full justify-end flex-shrink-0 w-3"><div className={`w-full rounded-t transition-all ${count > 0 ? 'bg-blue-600 hover:bg-blue-500' : 'bg-slate-800/50'}`} style={{ height: `${h}%`, minHeight: count > 0 ? `${h}%` : '4px' }}></div><span className={`text-[9px] mt-1 ${count > 0 ? 'text-slate-400 font-bold' : 'text-slate-700'}`}>{len}</span>{count > 0 && (<div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-slate-800 text-[10px] px-2 py-1 rounded border border-slate-700 opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-50 shadow-xl font-mono">Len {len}: <span className="text-white font-bold">{count}</span></div>)}</div>);
                                         });
-                                    })() : <div className="w-full h-full flex items-center justify-center text-xs text-slate-600 absolute left-0">No data</div>}
+                                    })() : <div className="w-full h-full flex items-center justify-center text-xs text-slate-600 absolute left-0">{t('insights_no_data_short')}</div>}
                                 </div>
                             </div>
                         </div>
@@ -2257,64 +2257,67 @@ const Insights: React.FC<InsightsProps> = ({
                         </div>
 
                         {/* CHART #5: ALGORITHM EFFICIENCY BAR CHART */}
-                        {algorithmRadarData.length > 1 && (
-                            <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
-                                <div className="flex items-center gap-2 mb-4">
-                                    <Activity size={18} className="text-rose-400"/>
-                                    <h3 className="font-bold text-slate-200">Algorithm Efficiency Comparison</h3>
-                                </div>
-                                {/* Fixed-height scrollable container — inner div grows with data */}
-                                <div className="h-64 overflow-y-auto custom-scrollbar">
-                                <div style={{ height: Math.max(200, algorithmRadarData.length * 44) }} className="w-full">
-                                    <ResponsiveContainer width="100%" height="100%">
-                                        <BarChart
-                                            data={algorithmRadarData}
-                                            layout="vertical"
-                                            margin={{ top: 4, right: 110, bottom: 4, left: 8 }}
-                                            barCategoryGap="30%"
-                                        >
-                                            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" horizontal={false} />
-                                            <XAxis type="number" hide />
-                                            <YAxis
-                                                type="category"
-                                                dataKey="subject"
-                                                width={145}
-                                                tick={{ fill: '#94a3b8', fontSize: 10 }}
-                                                tickLine={false}
-                                                axisLine={false}
-                                                tickFormatter={(v: string) => v.length > 22 ? v.substring(0, 20) + '…' : v}
-                                            />
-                                            <Tooltip content={({ active, payload }) => {
-                                                if (active && payload && payload.length) {
-                                                    const d = payload[0].payload;
-                                                    const v = d.fullValue;
-                                                    const fmt = v >= 1e9 ? `${(v/1e9).toFixed(2)} GH/W` : v >= 1e6 ? `${(v/1e6).toFixed(2)} MH/W` : v >= 1e3 ? `${(v/1e3).toFixed(2)} KH/W` : `${v.toFixed(0)} H/W`;
-                                                    return (
-                                                        <div className="bg-slate-900 border border-slate-700 p-2 rounded shadow-xl text-xs">
-                                                            <div className="font-bold text-rose-400 mb-1">{d.subject}</div>
-                                                            <div className="text-slate-300">Efficiency: <span className="text-white font-mono font-bold">{fmt}</span></div>
+                        {algorithmRadarData.length > 1 && (() => {
+                            const maxEfficiency = Math.max(...algorithmRadarData.map(d => d.A), 1);
+                            const getBarClass = (value: number) => {
+                                const ratio = value / maxEfficiency;
+                                if (ratio > 0.75) return 'from-amber-500 to-amber-400 shadow-[0_0_12px_rgba(251,191,36,0.3)]';
+                                if (ratio > 0.5) return 'from-amber-600 to-amber-500 shadow-[0_0_10px_rgba(245,158,11,0.2)]';
+                                if (ratio > 0.25) return 'from-amber-700 to-amber-600 shadow-[0_0_8px_rgba(217,119,6,0.15)]';
+                                return 'from-slate-600 to-slate-500 shadow-[0_0_6px_rgba(100,116,139,0.1)]';
+                            };
+                            const formatEfficiency = (v: number) => {
+                                if (v >= 1e9) return `${(v/1e9).toFixed(2)}G`;
+                                if (v >= 1e6) return `${(v/1e6).toFixed(2)}M`;
+                                if (v >= 1e3) return `${(v/1e3).toFixed(2)}K`;
+                                return `${v.toFixed(0)}`;
+                            };
+                            return (
+                                <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+                                    <div className="flex items-center justify-between mb-4">
+                                        <div className="flex items-center gap-2">
+                                            <Zap size={18} className="text-amber-400"/>
+                                            <h3 className="font-bold text-slate-200">{t('insights_algo_eff_title')}</h3>
+                                        </div>
+                                        <span className="text-[10px] text-amber-500/70 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">{t('insights_algo_eff_unit')}</span>
+                                    </div>
+                                    <div className="space-y-2.5 h-64 overflow-y-auto custom-scrollbar pr-1">
+                                        {algorithmRadarData.map((d, i) => {
+                                            const pct = maxEfficiency > 0 ? (d.A / maxEfficiency * 100) : 0;
+                                            const barClass = getBarClass(d.A);
+                                            return (
+                                                <div key={i} className="group flex items-center gap-3">
+                                                    <div className="w-[140px] shrink-0 text-right">
+                                                        <span className="text-xs text-slate-400 truncate block" title={d.subject}>{d.subject}</span>
+                                                    </div>
+                                                    <div className="flex-1 relative h-7 bg-slate-800/60 rounded-full overflow-hidden">
+                                                        <div
+                                                            className={`h-full rounded-full transition-all duration-500 bg-gradient-to-r ${barClass}`}
+                                                            style={{ width: `${Math.max(pct, 4)}%` }}
+                                                        />
+                                                        <div
+                                                            className="absolute top-1/2 -translate-y-1/2 text-[10px] font-bold whitespace-nowrap"
+                                                            style={{
+                                                                left: '50%',
+                                                                transform: 'translate(-50%, -50%)',
+                                                                color: '#fff',
+                                                                textShadow: `0 0 6px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,1), 0 1px 2px rgba(0,0,0,0.8)`
+                                                            }}
+                                                        >
+                                                            {formatEfficiency(d.A)} H/W
                                                         </div>
-                                                    );
-                                                }
-                                                return null;
-                                            }} />
-                                            <Bar dataKey="A" barSize={18} radius={[0, 4, 4, 0]} fill="#f43f5e">
-                                                <LabelList
-                                                    dataKey="A"
-                                                    position="right"
-                                                    fill="#cbd5e1"
-                                                    fontSize={11}
-                                                    fontWeight="bold"
-                                                    formatter={(v: number) => v >= 1e9 ? `${(v/1e9).toFixed(1)}G H/W` : v >= 1e6 ? `${(v/1e6).toFixed(1)}M H/W` : v >= 1e3 ? `${(v/1e3).toFixed(1)}K H/W` : `${v.toFixed(0)} H/W`}
-                                                />
-                                            </Bar>
-                                        </BarChart>
-                                    </ResponsiveContainer>
+                                                    </div>
+                                                    <div className="w-[60px] shrink-0 text-right">
+                                                        <span className={`text-[10px] font-mono ${pct > 75 ? 'text-amber-400' : pct > 50 ? 'text-amber-500/80' : pct > 25 ? 'text-slate-400' : 'text-slate-600'}`}>{pct.toFixed(0)}%</span>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                    <div className="text-[10px] text-slate-500 mt-2 text-center">{t('insights_algo_eff_desc')}</div>
                                 </div>
-                                </div>
-                                <div className="text-[10px] text-slate-500 mt-2 text-center">Average Hashes per Watt — higher is more efficient · hover a bar for details</div>
-                            </div>
-                        )}
+                            );
+                        })()}
 
                     </div>
                 </div>

@@ -639,10 +639,22 @@ function App() {
           const nextJob = jobQueue[0];
           addLog('general', `[QUEUE] Auto-starting next job: ${nextJob.id}${nextJob.workflowOpts ? ' [Smart Workflow]' : ''}`, 'INFO');
           setIsStarting(true);
+          // Keep the ref in sync immediately. The useEffect that mirrors
+          // isStarting → isStartingRef runs after this tick, but the
+          // session_started socket event for the queued job can fire during
+          // the await below; without this, isStartingRef.current is still
+          // false and setActiveSessionId(...) in the session_started handler
+          // never runs — which is why the Smart Workflow widget stayed hidden
+          // for queued runs.
+          isStartingRef.current = true;
 
           try {
               if (nextJob.workflowOpts) {
                   // Smart Workflow queue job — use the config snapshot saved at queue-add time
+                  // Clear any prior workflow state up-front so phase events that arrive during
+                  // the fetch await aren't wiped after the response comes back.
+                  setSmartWorkflowState(null);
+                  smartWorkflowStateRef.current = null;
                   const wOpts = nextJob.workflowOpts;
                   const qCfg = nextJob.config;
                   const unitToSec = wOpts.phase3TimeUnit === 'minutes' ? 60 : wOpts.phase3TimeUnit === 'hours' ? 3600 : 86400;
@@ -686,15 +698,23 @@ function App() {
                   const data = await res.json();
                   if (data.workflowId) {
                       runningConfigs.current[data.workflowId] = nextJob.config;
-                      setSmartWorkflowState(null);
+                      // Force-select the new workflow so the Smart Workflow widget
+                      // gates on the right activeSessionId. The session_started
+                      // handler also tries to do this, but only when isStartingRef
+                      // is already true — which races with React state updates.
+                      setActiveSessionId(data.workflowId);
+                      updateSession(data.workflowId, { hashType: nextJob.config.hashType });
                       setJobQueue(prev => prev.slice(1));
                       setActiveTab('dashboard');
                   } else {
                       sessionRunningRef.current = false;
                   }
               } else {
-                  // Regular session queue job
+                  // Regular session queue job — clear workflow state before the
+                  // request so any late phase events from a prior workflow can't
+                  // bleed in after the response returns.
                   setSmartWorkflowState(null);
+                  smartWorkflowStateRef.current = null;
                   setSmartPhase(null);
                   const payload = { ...nextJob.config };
                   const res = await fetch(getSocketUrl() + '/api/session/start', {
@@ -705,6 +725,7 @@ function App() {
                   const data = await res.json();
                   if (data.sessionId) {
                       runningConfigs.current[data.sessionId] = nextJob.config;
+                      setActiveSessionId(data.sessionId);
                       setJobQueue(prev => prev.slice(1));
                       setActiveTab('dashboard');
                   } else {
@@ -1087,17 +1108,22 @@ function App() {
 
   const handleAddToQueue = async () => {
       try {
-          let targetPath = config.targetPath;
-          let targetSummary = config.targetPath;
-          if (!targetPath) {
-             const manualPath = await prepareTarget();
-             if (manualPath) {
-                 targetPath = manualPath;
-                 targetSummary = manualTargetFile ? manualTargetFile.name : 'Manual Input Buffer';
-             } else {
-                 addLog('general', 'Cannot queue: No target selected.', 'ERROR');
-                 return;
-             }
+          // Prefer the user's current manual selection (uploads fresh) over any
+          // stale config.targetPath left over from a prior Escrow / library pick.
+          // Otherwise the queue snapshots the old path and the run fails on a
+          // multer-named upload that no longer matches what the user picked.
+          let targetPath = '';
+          let targetSummary = '';
+          const manualPath = await prepareTarget();
+          if (manualPath) {
+              targetPath = manualPath;
+              targetSummary = manualTargetFile ? manualTargetFile.name : 'Manual Input Buffer';
+          } else if (config.targetPath) {
+              targetPath = config.targetPath;
+              targetSummary = config.targetPath.split(/[\\/]/).pop() || config.targetPath;
+          } else {
+              addLog('general', 'Cannot queue: No target selected.', 'ERROR');
+              return;
           }
           const queueConfig = { ...config, targetPath };
           const newJob: QueueItem = {
@@ -1247,17 +1273,20 @@ function App() {
 
   const handleQueueSmartWorkflow = async (opts: SmartWorkflowOpts) => {
     try {
-      let targetPath = config.targetPath;
-      let targetSummary = config.targetPath;
-      if (!targetPath) {
-        const manualPath = await prepareTarget();
-        if (manualPath) {
-          targetPath = manualPath;
-          targetSummary = manualTargetFile ? manualTargetFile.name : 'Manual Input Buffer';
-        } else {
-          addLog('general', 'Cannot queue workflow: No target selected.', 'ERROR');
-          return;
-        }
+      // Mirror handleAddToQueue: prefer the live manual selection so a stale
+      // config.targetPath can't override the file the user just picked.
+      let targetPath = '';
+      let targetSummary = '';
+      const manualPath = await prepareTarget();
+      if (manualPath) {
+        targetPath = manualPath;
+        targetSummary = manualTargetFile ? manualTargetFile.name : 'Manual Input Buffer';
+      } else if (config.targetPath) {
+        targetPath = config.targetPath;
+        targetSummary = config.targetPath.split(/[\\/]/).pop() || config.targetPath;
+      } else {
+        addLog('general', 'Cannot queue workflow: No target selected.', 'ERROR');
+        return;
       }
       const queueConfig = { ...config, targetPath };
       const newJob: QueueItem = {
@@ -1699,7 +1728,66 @@ function App() {
             )}
 
             {activeTab === 'insights' && (<Insights globalPotfile={globalPotfile} sessionHashes={currentDisplayedCracks} session={session} pastSessions={pastSessions} config={config} setConfig={setConfig} setActiveTab={setActiveTab} addLog={addLog}/>)}
-            {activeTab === 'escrow' && (<EscrowDashboard apiKey={apiKey} setApiKey={setApiKey} initialSubmissionData={escrowSubmissionData} initialAlgoId={escrowSubmissionAlgo} autoUploadSettings={autoUploadSettings} onUpdateAutoUploadSettings={setAutoUploadSettings} sessions={sessions} activeSessionId={activeSessionId}/>)}
+            {activeTab === 'escrow' && (<EscrowDashboard apiKey={apiKey} setApiKey={setApiKey} initialSubmissionData={escrowSubmissionData} initialAlgoId={escrowSubmissionAlgo} autoUploadSettings={autoUploadSettings} onUpdateAutoUploadSettings={setAutoUploadSettings} sessions={sessions} activeSessionId={activeSessionId} addLog={addLog} onSetTarget={async (content, algoId) => {
+                addLog('general', '[ESCROW] Saving hash list as target...', 'INFO');
+                try {
+                    const targetRes = await fetch(`${getSocketUrl()}/api/target`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ content: content.trim(), filename: `escrow_target_${Date.now()}.txt` })
+                    });
+                    if (!targetRes.ok) throw new Error('Failed to save target file');
+                    const targetData = await targetRes.json();
+                    setConfig(prev => ({ ...prev, targetPath: targetData.path }));
+                    setManualTargetInput(content.trim());
+                    setManualTargetFile(null);
+                    
+                    // Auto-detect hash type from escrow job's algorithm ID
+                    addLog('general', '[ESCROW] Detecting hash type from job algorithm...', 'INFO');
+                    try {
+                        if (algoId) {
+                            // Try direct match first (hashes.com algo ID → hashcat mode ID)
+                            const directMatch = HASH_TYPES.find(h => h.id === String(algoId));
+                            if (directMatch) {
+                                setConfig(prev => {
+                                    const updated = { ...prev, hashType: directMatch.id };
+                                    addLog('general', `[ESCROW] Direct match: Mode ${directMatch.id} - ${directMatch.name}`, 'SUCCESS');
+                                    return updated;
+                                });
+                            } else {
+                                // Fallback: try name-based matching
+                                const algoName = escrowAlgorithms.find(a => a.id === algoId)?.algorithmName;
+                                if (algoName) {
+                                    const normalized = algoName.toLowerCase().replace(/[^a-z0-9]/g, '');
+                                    const nameMatch = HASH_TYPES.find(h => {
+                                        const hNorm = h.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+                                        return hNorm === normalized || hNorm.includes(normalized) || normalized.includes(hNorm);
+                                    });
+                                    if (nameMatch) {
+                                        setConfig(prev => {
+                                            const updated = { ...prev, hashType: nameMatch.id };
+                                            addLog('general', `[ESCROW] Name match: Mode ${nameMatch.id} - ${nameMatch.name}`, 'SUCCESS');
+                                            return updated;
+                                        });
+                                    } else {
+                                        addLog('general', `[ESCROW] Could not map algorithm "${algoName}" to a hash mode`, 'WARN');
+                                    }
+                                }
+                            }
+                        } else {
+                            addLog('general', '[ESCROW] No algorithm ID available for detection', 'WARN');
+                        }
+                    } catch (detectErr: any) {
+                        addLog('general', `[ESCROW] Hash type detection error: ${detectErr.message}`, 'WARN');
+                    }
+                    
+                    setActiveTab('dashboard');
+                    addLog('general', `[ESCROW] Hash list set as target: ${targetData.path}`, 'SUCCESS');
+                } catch (e: any) {
+                    addLog('general', `[ESCROW] Failed to set target: ${e.message}`, 'ERROR');
+                    console.error('[ESCROW] Failed to set target:', e);
+                }
+            }}/>)}
             
             {/* File2John Component */}
             {activeTab === 'file2john' && (

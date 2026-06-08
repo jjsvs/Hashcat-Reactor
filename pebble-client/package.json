@@ -1,0 +1,150 @@
+{
+  "name": "hashcat-reactor",
+  "author": "Hashcat Reactor",
+  "version": "1.0.0",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Hashcat Reactor",
+    "uuid": "6f7e1c3a-8b22-4d6f-9e34-5a1b2c3d4e5f",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "aplite",
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery",
+      "flint",
+      "gabbro"
+    ],
+    "watchapp": {
+      "watchface": false,
+      "hiddenApp": false,
+      "onlyShownOnCommunication": false
+    },
+    "messageKeys": [
+      "MSG_TYPE",
+      "OV_TOTAL_HASHRATE",
+      "OV_ALGO",
+      "OV_SESSION_COUNT",
+      "OV_TOTAL_RECOVERED",
+      "OV_RECOVERED_TOTAL",
+      "OV_RECENT_PLAINS",
+      "OV_TOTAL_SUBMITTED",
+      "OV_PROGRESS",
+      "OV_TOTAL_POWER",
+      "OV_HIST_REC",
+      "OV_HIST_ENERGY",
+      "OV_HIST_COST",
+      "OV_MAX_TEMP",
+      "OV_GPU_TEMPS",
+      "OV_LAST_UPDATE",
+      "OV_SESSIONS_BLOB",
+      "SD_INDEX",
+      "SD_NAME",
+      "SD_ALGORITHM",
+      "SD_STATUS",
+      "SD_HASHRATE",
+      "SD_RECOVERED",
+      "SD_TOTAL",
+      "SD_PROGRESS",
+      "SD_ETR",
+      "SD_UPTIME",
+      "SD_AVG_POWER",
+      "BAL_BTC",
+      "BAL_BTC_USD",
+      "BAL_LTC",
+      "BAL_LTC_USD",
+      "BAL_XMR",
+      "BAL_XMR_USD",
+      "BAL_TOTAL_USD",
+      "BAL_HAS_KEY",
+      "ERR_MSG",
+      "REQUEST_TYPE",
+      "REQUEST_INDEX"
+    ],
+    "resources": {
+      "media": [
+        {
+          "type": "bitmap",
+          "name": "IMAGE_MENU_ICON",
+          "file": "images/menu_icon.png",
+          "menuIcon": true
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_IC_BOLT",
+          "file": "images/ic_bolt.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_IC_CHECK",
+          "file": "images/ic_check.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_IC_BTC",
+          "file": "images/ic_btc.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_IC_LTC",
+          "file": "images/ic_ltc.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_IC_XMR",
+          "file": "images/ic_xmr.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_IC_WALLET",
+          "file": "images/ic_wallet.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_IC_TEMP",
+          "file": "images/ic_temp.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_IC_CLOCK",
+          "file": "images/ic_clock.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_IC_GAUGE",
+          "file": "images/ic_gauge.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_IC_SESSION",
+          "file": "images/ic_session.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_IC_CHIP",
+          "file": "images/ic_chip.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_IC_MENU",
+          "file": "images/ic_menu.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_IC_DOT",
+          "file": "images/ic_dot.png"
+        }
+      ]
+    },
+    "projectType": "native",
+    "capabilities": [
+      "configurable"
+    ]
+  }
+}

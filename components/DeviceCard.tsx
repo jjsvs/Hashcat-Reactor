@@ -1,12 +1,14 @@
 import React from 'react';
 import { GpuDevice } from '../types';
 import { Cpu, Thermometer, Fan, Activity } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 interface DeviceCardProps {
   device: GpuDevice;
 }
 
 const DeviceCard: React.FC<DeviceCardProps> = ({ device }) => {
+  const { t } = useTranslation();
   const getTempColor = (temp: number) => {
     if (temp < 60) return 'text-emerald-400';
     if (temp < 80) return 'text-yellow-400';
@@ -37,7 +39,7 @@ const DeviceCard: React.FC<DeviceCardProps> = ({ device }) => {
           <span className={`text-lg font-mono font-bold ${getTempColor(device.temp)}`}>
             {device.temp}°
           </span>
-          <span className="text-[10px] uppercase text-slate-600 font-semibold">Temp</span>
+          <span className="text-[10px] uppercase text-slate-600 font-semibold">{t('device_temp')}</span>
         </div>
 
         {/* Fan Speed */}
@@ -46,7 +48,7 @@ const DeviceCard: React.FC<DeviceCardProps> = ({ device }) => {
           <span className="text-lg font-mono font-bold text-slate-200">
             {device.fanSpeed}%
           </span>
-          <span className="text-[10px] uppercase text-slate-600 font-semibold">Fan</span>
+          <span className="text-[10px] uppercase text-slate-600 font-semibold">{t('device_fan')}</span>
         </div>
 
         {/* Utilization */}
@@ -55,13 +57,13 @@ const DeviceCard: React.FC<DeviceCardProps> = ({ device }) => {
           <span className="text-lg font-mono font-bold text-slate-200">
             {device.utilization}%
           </span>
-          <span className="text-[10px] uppercase text-slate-600 font-semibold">Load</span>
+          <span className="text-[10px] uppercase text-slate-600 font-semibold">{t('device_load')}</span>
         </div>
       </div>
 
       <div className="flex justify-between items-center text-xs text-slate-500 mt-2 px-1">
-        <span>Core: <span className="text-slate-300 font-mono">{device.coreClock} MHz</span></span>
-        <span>Mem: <span className="text-slate-300 font-mono">{device.memoryClock} MHz</span></span>
+        <span>{t('device_core')} <span className="text-slate-300 font-mono">{device.coreClock} MHz</span></span>
+        <span>{t('device_mem')} <span className="text-slate-300 font-mono">{device.memoryClock} MHz</span></span>
       </div>
       
       {/* Usage Bar */}
