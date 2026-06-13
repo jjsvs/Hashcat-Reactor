@@ -1,6 +1,6 @@
 # Hashcat Reactor
 
-**Hashcat Reactor** is a modern, high-performance GUI frontend for Hashcat, built specifically for **Windows**. It transforms the command-line experience into a visual dashboard with advanced analytics, job queuing, real-time monitoring, and intelligent attack automation.
+**Hashcat Reactor** is a modern, high-performance GUI frontend for Hashcat. Originally built for **Windows**, it now runs cross-platform on **Windows, Linux, and macOS** (see [Platform Support](#-platform-support-windows--linux--macos)). It transforms the command-line experience into a visual dashboard with advanced analytics, job queuing, real-time monitoring, and intelligent attack automation.
 
 ## 🚀 Features
 
@@ -94,6 +94,52 @@ This project is designed to be built for Windows.
     npm run electron:build
     ```
     *The output installer will be located in the `dist` folder.*.
+
+---
+
+## 🖥 Platform Support (Windows / Linux / macOS)
+
+Hashcat Reactor is a GUI front-end — the actual work is done by external engines:
+**hashcat** (cracking), **John the Ripper** (`*2john` hash extractors), and
+**princeprocessor** (`pp64`, PRINCE attack). The backend resolves each tool
+automatically per platform (`getHashcatConfig`, `getPrincePath`,
+`resolveJohnTool` in `backend/server.js`): it prefers a bundled binary, and on
+macOS falls back to the tool on your `PATH`.
+
+### Windows
+Everything is bundled — no extra installs.
+* hashcat: `backend/hashcat/hashcat.exe`
+* princeprocessor: `backend/princeprocessor/pp64.exe`
+* file2john: `backend/john/win32/` (compiled `.exe` tools + PyInstaller-packaged Python/Perl tools)
+
+Cracking still requires a working **GPU runtime/driver** (NVIDIA CUDA, AMD ROCm/Adrenalin, or Intel OpenCL).
+
+### Linux
+Binaries are bundled — no extra installs needed for the tools themselves.
+* hashcat: `backend/hashcat/hashcat.bin` (v7.1.2)
+* princeprocessor: `backend/princeprocessor/pp64.bin`
+* file2john: `backend/john/linux/` — 6 compiled C tools (`zip2john`, `rar2john`, `gpg2john`, `putty2john`, `keepass2john`, `bitlocker2john`) + 25 cross-platform `.py`/`.pl` script tools
+
+Prerequisites:
+```bash
+sudo apt install python3 perl        # for the script-based *2john tools (Debian/Ubuntu)
+# GPU runtime for hashcat: NVIDIA CUDA / AMD ROCm / Intel OpenCL (or PoCL for CPU)
+```
+
+### macOS
+macOS does **not** use the bundled `hashcat.bin` / `pp64.bin` — those are Linux ELF binaries and cannot run on macOS. Install the engines with **[Homebrew](https://brew.sh)** and the app picks them up from your `PATH`:
+```bash
+brew install hashcat       # cracking engine (Metal backend on Apple Silicon)
+brew install john-jumbo    # provides zip2john, rar2john, gpg2john, etc. on PATH
+# pp64 (princeprocessor): only needed for the PRINCE attack — build from source
+# (https://github.com/hashcat/princeprocessor) or drop a mac `pp64` into backend/princeprocessor/
+```
+`python3` and `perl` ship with macOS, so the 25 script-based `*2john` tools (bundled in `backend/john/darwin/`) work out of the box; the 6 native C tools come from `brew install john-jumbo`.
+
+> To avoid the Homebrew prerequisites, you can instead bundle native macOS (Mach-O) binaries: drop `hashcat` into `backend/hashcat/`, `pp64` into `backend/princeprocessor/`, and the 6 compiled tools into `backend/john/darwin/`. The resolver prefers a bundled binary when present.
+
+### Building per platform
+`node-pty` is a native module and **cannot be cross-compiled** — build the installer for each OS on that OS (or via a CI matrix: `windows-latest` / `macos-latest` / `ubuntu-latest`). Packaging targets are configured in `package.json` → `build` (`win`: NSIS, `mac`: dmg/zip, `linux`: AppImage/deb).
 
 ---
 

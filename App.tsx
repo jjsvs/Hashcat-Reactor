@@ -371,8 +371,8 @@ function App() {
 
   const [smartPhase, setSmartPhase] = useState<{ phase: number; message: string } | null>(null);
 
-  interface SmartPhaseEntry { n: number; status: 'pending' | 'running' | 'done' | 'skipped' | 'aborted'; message: string; learned?: number; masks?: number; skippedMasks?: number; phaseRecovered?: number; hashrateHps?: number; hashrateSource?: string; }
-  interface SmartWorkflowState { workflowId: string; currentPhase: number; phases: SmartPhaseEntry[]; complete: boolean; maskFileId?: string; skippedMasks?: number; }
+  interface SmartPhaseEntry { n: number; status: 'pending' | 'running' | 'done' | 'skipped' | 'aborted'; message: string; learned?: number; masks?: number; usedMasks?: number; skippedMasks?: number; phaseRecovered?: number; hashrateHps?: number; hashrateSource?: string; }
+  interface SmartWorkflowState { workflowId: string; currentPhase: number; phases: SmartPhaseEntry[]; complete: boolean; maskFileId?: string; usedMasks?: number; skippedMasks?: number; }
   const [smartWorkflowState, setSmartWorkflowState] = useState<SmartWorkflowState | null>(null);
   const smartWorkflowStateRef = useRef<SmartWorkflowState | null>(null);
   const [swHeaderOpen, setSwHeaderOpen] = useState(false);
@@ -838,7 +838,7 @@ function App() {
         else if (type === 'total') updateSession(sessionId, { total: value });
         else if (type === 'time_estimated') updateSession(sessionId, { estimatedTimeRemaining: value });
       });
-      socket.on('smart_workflow_phase', (data: { workflowId: string; phase: number; message: string; complete?: boolean; skipped?: boolean; learned?: number; masks?: number; skippedMasks?: number; maskFileId?: string; phaseRecovered?: number; hashrateHps?: number; hashrateSource?: string }) => {
+      socket.on('smart_workflow_phase', (data: { workflowId: string; phase: number; message: string; complete?: boolean; skipped?: boolean; learned?: number; masks?: number; usedMasks?: number; skippedMasks?: number; maskFileId?: string; phaseRecovered?: number; hashrateHps?: number; hashrateSource?: string }) => {
           const isDone = data.complete || data.skipped;
           setSmartPhase(data.complete ? null : { phase: data.phase, message: data.message });
           addLog(data.workflowId, `[Smart Phase ${data.phase}/4] ${data.message}`, 'INFO');
@@ -856,6 +856,7 @@ function App() {
               phases: [1, 2, 3, 4].map(n => ({ n, status: 'pending' as const, message: '' })),
               complete: false,
               maskFileId: undefined as string | undefined,
+              usedMasks: undefined as number | undefined,
               skippedMasks: undefined as number | undefined,
           };
           const phases = base.phases.map(p => {
@@ -866,6 +867,7 @@ function App() {
                   message: data.message,
                   learned: data.learned,
                   masks: data.masks,
+                  usedMasks: data.usedMasks,
                   skippedMasks: data.skippedMasks,
                   phaseRecovered: data.phaseRecovered !== undefined ? (p.phaseRecovered || 0) + data.phaseRecovered : p.phaseRecovered,
                   hashrateHps: data.hashrateHps !== undefined ? data.hashrateHps : p.hashrateHps,
@@ -879,6 +881,7 @@ function App() {
               phases,
               complete: !!data.complete,
               maskFileId: data.maskFileId || base.maskFileId,
+              usedMasks: data.usedMasks !== undefined ? data.usedMasks : base.usedMasks,
               skippedMasks: data.skippedMasks !== undefined ? data.skippedMasks : base.skippedMasks,
           };
           smartWorkflowStateRef.current = nextState;
@@ -1026,6 +1029,7 @@ function App() {
           analysis: analysisSnapshot,
           phaseBreakdown,
           maskFileId: isWorkflow && swState?.workflowId === sessionId ? swState.maskFileId : undefined,
+          usedMasks: isWorkflow && swState?.workflowId === sessionId ? swState.usedMasks : undefined,
           skippedMasks: isWorkflow && swState?.workflowId === sessionId ? swState.skippedMasks : undefined,
           sessionId: sessionId,
       };
@@ -1187,6 +1191,7 @@ function App() {
       phases,
       complete: true,
       maskFileId: past.maskFileId,
+      usedMasks: past.usedMasks,
       skippedMasks: past.skippedMasks,
     };
   }, [smartWorkflowState, activeSessionId, pastSessions]);

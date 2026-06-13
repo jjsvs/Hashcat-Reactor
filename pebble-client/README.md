@@ -262,6 +262,7 @@ chalk / gabbro displays).
 | **Up / Down**               | Previous / next card (animated slide).              |
 | **Select**                  | Force-refresh overview + balance (+ vibrate).       |
 | **Select** (Sessions card)  | Open the scrollable per-session list.               |
+| **Select** (Recovered card) | Open the timestamped crack feed.                    |
 | **Select** (in the list)    | Open the highlighted session's detail screen.       |
 | **Back**                    | Return to the deck / exit the app.                  |
 | **Swipe up / down**         | Next / previous card (emery + gabbro, `PBL_TOUCH`). |

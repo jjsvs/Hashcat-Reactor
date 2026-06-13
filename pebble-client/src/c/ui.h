@@ -43,11 +43,9 @@ typedef enum {
   UI_ICON_XMR,         // XMR balance
   UI_ICON_WALLET,      // balance card
   UI_ICON_TEMP,        // GPU temperature
-  UI_ICON_CLOCK,       // uptime / last update
+  UI_ICON_CHART,       // insights / history charts
   UI_ICON_GAUGE,       // power / ETR
   UI_ICON_SESSION,     // session count
-  UI_ICON_CHIP,        // algorithm / mode
-  UI_ICON_MENU,        // menu/list
   UI_ICON_DOT,         // page indicator
   UI_ICON_COUNT_
 } UiIcon;

@@ -48,20 +48,123 @@ const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } 
 const PORT = 3001;
 
 const getJohnPath = () => {
-    const platform = process.platform === 'win32' ? 'win32' : 'linux';
+    const platform = process.platform === 'win32' ? 'win32'
+                   : process.platform === 'darwin' ? 'darwin'
+                   : 'linux';
     if (IS_ELECTRON && RESOURCES_PATH) {
         return path.join(RESOURCES_PATH, 'backend', 'john', platform);
     }
     return path.join(__dirname, 'john', platform);
 };
 
+// Python/Perl interpreters used to run JtR's script-based *2john tools on
+// Linux/macOS (Windows ships PyInstaller .exe wrappers instead).
+const PYTHON_BIN = process.platform === 'win32' ? 'python' : 'python3';
+
+// File2john tool registry. JtR's *2john extractors come in three flavours:
+//   native — a compiled C binary: <name>.exe on Windows, bare <name> on *nix
+//   python — a .py script: shipped as a PyInstaller .exe (in a same-named
+//            subfolder) on Windows, run via python3 on Linux/macOS
+//   perl   — a .pl script: shipped as a .exe on Windows, run via perl on *nix
+// Keys match the `type` values the frontend sends.
+const JOHN_TOOLS = {
+    zip:        { kind: 'native', name: 'zip2john' },
+    '7z':       { kind: 'perl',   name: '7z2john' },
+    rar:        { kind: 'native', name: 'rar2john' },
+    // dmg/ssh/android ship a .py alongside the C binary — use the script on
+    // *nix so they need no compiled binary (Windows still prefers the .exe).
+    dmg:        { kind: 'python', name: 'dmg2john' },
+    office:     { kind: 'python', name: 'office2john' },
+    pdf:        { kind: 'perl',   name: 'pdf2john' },
+    libreoffice:{ kind: 'python', name: 'libreoffice2john' },
+    staroffice: { kind: 'python', name: 'staroffice2john' },
+    putty:      { kind: 'native', name: 'putty2john' },
+    pfx:        { kind: 'python', name: 'pfx2john' },
+    gpg:        { kind: 'native', name: 'gpg2john' },
+    keepass:    { kind: 'native', name: 'keepass2john' },
+    ssh:        { kind: 'python', name: 'ssh2john' },
+    keychain:   { kind: 'python', name: 'keychain2john' },
+    keyring:    { kind: 'python', name: 'keyring2john' },
+    keystore:   { kind: 'python', name: 'keystore2john' },
+    ethereum:   { kind: 'python', name: 'ethereum2john' },
+    monero:     { kind: 'python', name: 'monero2john' },
+    electrum:   { kind: 'python', name: 'electrum2john' },
+    bitlocker:  { kind: 'native', name: 'bitlocker2john' },
+    telegram:   { kind: 'python', name: 'telegram2john' },
+    android:    { kind: 'python', name: 'androidbackup2john' },
+    mozilla:    { kind: 'python', name: 'mozilla2john' },
+    itunes:     { kind: 'perl',   name: 'itunes_backup2john' },
+    filezilla:  { kind: 'python', name: 'filezilla2john' },
+    apex:       { kind: 'python', name: 'apex2john' },
+    applenotes: { kind: 'python', name: 'applenotes2john' },
+    aruba:      { kind: 'python', name: 'aruba2john' },
+    money:      { kind: 'python', name: 'money2john' },
+    neo:        { kind: 'python', name: 'neo2john' },
+    padlock:    { kind: 'python', name: 'padlock2john' },
+};
+
+// Resolve how to invoke a john tool on the current platform.
+// Returns { command, args } where args precede the input file path, or
+// { error } describing what's missing.
+const resolveJohnTool = (toolKey) => {
+    const tool = JOHN_TOOLS[toolKey];
+    if (!tool) return { error: 'Unsupported file type.' };
+    const johnDir = getJohnPath();
+    const tryScript = (interp, ext) => {
+        const script = path.join(johnDir, `${tool.name}${ext}`);
+        if (fs.existsSync(script)) return { command: interp, args: [script] };
+        return null;
+    };
+
+    if (process.platform === 'win32') {
+        // Prefer the shipped .exe: native tools sit at the run-dir root,
+        // python/perl tools are packaged as <name>/<name>.exe.
+        const rootExe = path.join(johnDir, `${tool.name}.exe`);
+        if (fs.existsSync(rootExe)) return { command: rootExe, args: [] };
+        const subExe = path.join(johnDir, tool.name, `${tool.name}.exe`);
+        if (fs.existsSync(subExe)) return { command: subExe, args: [] };
+        // Fall back to the raw script if no .exe was bundled.
+        const fb = tool.kind === 'perl' ? tryScript('perl', '.pl')
+                 : tool.kind === 'python' ? tryScript(PYTHON_BIN, '.py')
+                 : null;
+        if (fb) return fb;
+        return { error: `Binary not found for "${toolKey}".`, details: rootExe };
+    }
+
+    // Linux / macOS
+    if (tool.kind === 'native') {
+        const bin = path.join(johnDir, tool.name);
+        if (fs.existsSync(bin)) return { command: bin, args: [] };
+        // No bundled binary (e.g. macOS, where we don't ship compiled C tools):
+        // fall back to the tool on PATH, i.e. a Homebrew `john-jumbo` install.
+        if (process.platform === 'darwin') return { command: tool.name, args: [] };
+        return { error: `Binary "${tool.name}" not found — add it to backend/john/linux.`, details: bin };
+    }
+    const res = tool.kind === 'perl' ? tryScript('perl', '.pl') : tryScript(PYTHON_BIN, '.py');
+    if (res) return res;
+    const ext = tool.kind === 'perl' ? '.pl' : '.py';
+    return { error: `Script "${tool.name}${ext}" not found — add it to backend/john/${process.platform === 'darwin' ? 'darwin' : 'linux'}.`, details: path.join(johnDir, `${tool.name}${ext}`) };
+};
+
 // --- PRINCE PROCESSOR PATH ---
 const getPrincePath = () => {
-    const binary = process.platform === 'win32' ? 'pp64.exe' : 'pp64.bin';
-    if (IS_ELECTRON && RESOURCES_PATH) {
-        return path.join(RESOURCES_PATH, 'backend', 'princeprocessor', binary);
+    const plat = process.platform;
+    // Windows ships pp64.exe, Linux ships pp64.bin. macOS has no bundled binary
+    // (it can't run the Linux ELF) — prefer a bundled mac `pp64` if present,
+    // otherwise fall back to `pp64` on PATH (e.g. a Homebrew install).
+    const candidates = plat === 'win32' ? ['pp64.exe']
+                     : plat === 'darwin' ? ['pp64']
+                     : ['pp64.bin', 'pp64'];
+    const dirs = [];
+    if (IS_ELECTRON && RESOURCES_PATH) dirs.push(path.join(RESOURCES_PATH, 'backend', 'princeprocessor'));
+    dirs.push(path.join(__dirname, 'princeprocessor'));
+    for (const dir of dirs) {
+        for (const name of candidates) {
+            const p = path.join(dir, name);
+            if (fs.existsSync(p)) return p;
+        }
     }
-    return path.join(__dirname, 'princeprocessor', binary);
+    return 'pp64'; // resolve via PATH
 };
 
 // --- HELPER: HASH CLEANER ---
@@ -134,49 +237,48 @@ const cleanHash = (line) => {
 
 app.post('/api/tools/file2john', upload.single('file'), (req, res) => {
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
-    const johnDir = getJohnPath();
     const type = req.body.type || 'auto';
     const filename = req.file.originalname.toLowerCase();
-    let exe = '';
+    let toolKey = '';
 
-    if (type === 'zip' || (type === 'auto' && filename.endsWith('.zip'))) exe = 'zip2john.exe';
-    else if (type === '7z' || (type === 'auto' && filename.endsWith('.7z'))) exe = '7z2john.exe';
-    else if (type === 'rar' || (type === 'auto' && filename.endsWith('.rar'))) exe = 'rar2john.exe';
-    else if (type === 'dmg' || (type === 'auto' && filename.endsWith('.dmg'))) exe = 'dmg2john.exe';
-    else if (type === 'office' || (type === 'auto' && (filename.endsWith('.docx') || filename.endsWith('.xlsx') || filename.endsWith('.doc') || filename.endsWith('.xls') || filename.endsWith('.ppt') || filename.endsWith('.pptx')))) exe = 'office2john/office2john.exe';
-    else if (type === 'pdf' || (type === 'auto' && filename.endsWith('.pdf'))) exe = 'pdf2john/pdf2john.exe';
-    else if (type === 'libreoffice' || (type === 'auto' && (filename.endsWith('.odt') || filename.endsWith('.ods') || filename.endsWith('.odp') || filename.endsWith('.odg')))) exe = 'libreoffice2john/libreoffice2john.exe';
-    else if (type === 'staroffice' || (type === 'auto' && (filename.endsWith('.sdc') || filename.endsWith('.sdw') || filename.endsWith('.sda') || filename.endsWith('.sdd')))) exe = 'staroffice2john/staroffice2john.exe';
-    else if (type === 'putty' || (type === 'auto' && filename.endsWith('.ppk'))) exe = 'putty2john.exe';
-    else if (type === 'pfx' || (type === 'auto' && filename.endsWith('.pfx'))) exe = 'pfx2john.exe';
-    else if (type === 'gpg' || (type === 'auto' && filename.endsWith('.gpg'))) exe = 'gpg2john.exe';
-    else if (type === 'keepass' || (type === 'auto' && filename.endsWith('.kdbx'))) exe = 'keepass2john.exe';
-    else if (type === 'ssh' || (type === 'auto' && filename.includes('id_rsa'))) exe = 'ssh2john.exe';
-    else if (type === 'keychain' || (type === 'auto' && (filename.endsWith('.keychain') || filename.endsWith('.keychain-db')))) exe = 'keychain2john/keychain2john.exe';
-    else if (type === 'keyring' || (type === 'auto' && filename.endsWith('.keyring'))) exe = 'keyring2john/keyring2john.exe';
-    else if (type === 'keystore' || (type === 'auto' && (filename.endsWith('.jks') || filename.endsWith('.keystore')))) exe = 'keystore2john/keystore2john.exe';
-    else if (type === 'ethereum') exe = 'ethereum2john/ethereum2john.exe';
-    else if (type === 'monero' || (type === 'auto' && filename.endsWith('.keys'))) exe = 'monero2john/monero2john.exe';
-    else if (type === 'electrum' || (type === 'auto' && (filename.includes('electrum') || filename === 'default_wallet'))) exe = 'electrum2john/electrum2john.exe';
-    else if (type === 'bitlocker') exe = 'bitlocker2john.exe';
-    else if (type === 'telegram' || (type === 'auto' && (filename.includes('map') || filename.includes('telegram')))) exe = 'telegram2john/telegram2john.exe';
-    else if (type === 'android' || (type === 'auto' && filename.endsWith('.ab'))) exe = 'androidbackup2john.exe';
-    else if (type === 'mozilla' || (type === 'auto' && filename === 'key4.db')) exe = 'mozilla2john/mozilla2john.exe';
-    else if (type === 'itunes' || (type === 'auto' && filename === 'manifest.plist')) exe = 'itunes_backup2john.exe';
-    else if (type === 'filezilla' || (type === 'auto' && (filename.includes('filezilla') || (filename.endsWith('.xml') && filename.includes('server'))))) exe = 'filezilla2john/filezilla2john.exe';
-    else if (type === 'apex' || (type === 'auto' && filename.includes('apex'))) exe = 'apex2john/apex2john.exe';
-    else if (type === 'applenotes' || (type === 'auto' && (filename.includes('notestore') || filename.endsWith('.sqlite')))) exe = 'applenotes2john/applenotes2john.exe';
-    else if (type === 'aruba' || (type === 'auto' && (filename.includes('aruba') || filename.endsWith('.cfg')))) exe = 'aruba2john/aruba2john.exe';
-    else if (type === 'money' || (type === 'auto' && filename.endsWith('.mny'))) exe = 'money2john/money2john.exe';
-    else if (type === 'neo' || (type === 'auto' && (filename.endsWith('.wlt') || filename.endsWith('.db3')))) exe = 'neo2john/neo2john.exe';
-    else if (type === 'padlock' || (type === 'auto' && filename.endsWith('.padlock'))) exe = 'padlock2john/padlock2john.exe';
+    if (type === 'zip' || (type === 'auto' && filename.endsWith('.zip'))) toolKey = 'zip';
+    else if (type === '7z' || (type === 'auto' && filename.endsWith('.7z'))) toolKey = '7z';
+    else if (type === 'rar' || (type === 'auto' && filename.endsWith('.rar'))) toolKey = 'rar';
+    else if (type === 'dmg' || (type === 'auto' && filename.endsWith('.dmg'))) toolKey = 'dmg';
+    else if (type === 'office' || (type === 'auto' && (filename.endsWith('.docx') || filename.endsWith('.xlsx') || filename.endsWith('.doc') || filename.endsWith('.xls') || filename.endsWith('.ppt') || filename.endsWith('.pptx')))) toolKey = 'office';
+    else if (type === 'pdf' || (type === 'auto' && filename.endsWith('.pdf'))) toolKey = 'pdf';
+    else if (type === 'libreoffice' || (type === 'auto' && (filename.endsWith('.odt') || filename.endsWith('.ods') || filename.endsWith('.odp') || filename.endsWith('.odg')))) toolKey = 'libreoffice';
+    else if (type === 'staroffice' || (type === 'auto' && (filename.endsWith('.sdc') || filename.endsWith('.sdw') || filename.endsWith('.sda') || filename.endsWith('.sdd')))) toolKey = 'staroffice';
+    else if (type === 'putty' || (type === 'auto' && filename.endsWith('.ppk'))) toolKey = 'putty';
+    else if (type === 'pfx' || (type === 'auto' && filename.endsWith('.pfx'))) toolKey = 'pfx';
+    else if (type === 'gpg' || (type === 'auto' && filename.endsWith('.gpg'))) toolKey = 'gpg';
+    else if (type === 'keepass' || (type === 'auto' && filename.endsWith('.kdbx'))) toolKey = 'keepass';
+    else if (type === 'ssh' || (type === 'auto' && filename.includes('id_rsa'))) toolKey = 'ssh';
+    else if (type === 'keychain' || (type === 'auto' && (filename.endsWith('.keychain') || filename.endsWith('.keychain-db')))) toolKey = 'keychain';
+    else if (type === 'keyring' || (type === 'auto' && filename.endsWith('.keyring'))) toolKey = 'keyring';
+    else if (type === 'keystore' || (type === 'auto' && (filename.endsWith('.jks') || filename.endsWith('.keystore')))) toolKey = 'keystore';
+    else if (type === 'ethereum') toolKey = 'ethereum';
+    else if (type === 'monero' || (type === 'auto' && filename.endsWith('.keys'))) toolKey = 'monero';
+    else if (type === 'electrum' || (type === 'auto' && (filename.includes('electrum') || filename === 'default_wallet'))) toolKey = 'electrum';
+    else if (type === 'bitlocker') toolKey = 'bitlocker';
+    else if (type === 'telegram' || (type === 'auto' && (filename.includes('map') || filename.includes('telegram')))) toolKey = 'telegram';
+    else if (type === 'android' || (type === 'auto' && filename.endsWith('.ab'))) toolKey = 'android';
+    else if (type === 'mozilla' || (type === 'auto' && filename === 'key4.db')) toolKey = 'mozilla';
+    else if (type === 'itunes' || (type === 'auto' && filename === 'manifest.plist')) toolKey = 'itunes';
+    else if (type === 'filezilla' || (type === 'auto' && (filename.includes('filezilla') || (filename.endsWith('.xml') && filename.includes('server'))))) toolKey = 'filezilla';
+    else if (type === 'apex' || (type === 'auto' && filename.includes('apex'))) toolKey = 'apex';
+    else if (type === 'applenotes' || (type === 'auto' && (filename.includes('notestore') || filename.endsWith('.sqlite')))) toolKey = 'applenotes';
+    else if (type === 'aruba' || (type === 'auto' && (filename.includes('aruba') || filename.endsWith('.cfg')))) toolKey = 'aruba';
+    else if (type === 'money' || (type === 'auto' && filename.endsWith('.mny'))) toolKey = 'money';
+    else if (type === 'neo' || (type === 'auto' && (filename.endsWith('.wlt') || filename.endsWith('.db3')))) toolKey = 'neo';
+    else if (type === 'padlock' || (type === 'auto' && filename.endsWith('.padlock'))) toolKey = 'padlock';
 
-    if (!exe) return res.status(400).json({ message: 'Unsupported file type.' });
+    if (!toolKey) return res.status(400).json({ message: 'Unsupported file type.' });
 
-    const binaryPath = path.join(johnDir, exe);
-    if (!fs.existsSync(binaryPath)) return res.status(500).json({ message: 'Binary not found', details: binaryPath });
+    const resolved = resolveJohnTool(toolKey);
+    if (resolved.error) return res.status(500).json({ message: resolved.error, details: resolved.details });
 
-    const proc = spawn(binaryPath, [req.file.path]);
+    const proc = spawn(resolved.command, [...resolved.args, req.file.path]);
     let stdout = '';
     let stderr = '';
 
@@ -258,15 +360,25 @@ function parseHashcatTimeToSec(s) {
 const uuid = () => Math.random().toString(36).substring(2, 9);
 
 const getHashcatConfig = () => {
-  const isWin = process.platform === 'win32';
-  const binaryName = isWin ? 'hashcat.exe' : 'hashcat.bin';
-  if (IS_ELECTRON && RESOURCES_PATH) {
-      const prodExe = path.join(RESOURCES_PATH, 'backend', 'hashcat', binaryName);
-      if (fs.existsSync(prodExe)) return { executable: prodExe, cwd: path.dirname(prodExe) };
+  const plat = process.platform;
+  // Candidate bundled binary names by platform. Windows: hashcat.exe; Linux:
+  // hashcat.bin (or a self-compiled bare `hashcat`). macOS deliberately does
+  // NOT consider hashcat.bin — that's a Linux ELF and can't exec on macOS — so
+  // it only uses a bundled mac `hashcat` if present, else the PATH fallback
+  // below (a Homebrew `brew install hashcat`).
+  const candidates = plat === 'win32' ? ['hashcat.exe']
+                   : plat === 'darwin' ? ['hashcat']
+                   : ['hashcat.bin', 'hashcat'];
+  const dirs = [];
+  if (IS_ELECTRON && RESOURCES_PATH) dirs.push(path.join(RESOURCES_PATH, 'backend', 'hashcat'));
+  dirs.push(path.join(__dirname, 'hashcat'));
+  for (const dir of dirs) {
+      for (const name of candidates) {
+          const exe = path.join(dir, name);
+          if (fs.existsSync(exe)) return { executable: exe, cwd: dir };
+      }
   }
-  const localExe = path.join(__dirname, 'hashcat', binaryName);
-  if (fs.existsSync(localExe)) return { executable: localExe, cwd: path.dirname(localExe) };
-  return { executable: 'hashcat', cwd: uploadDir }; 
+  return { executable: 'hashcat', cwd: uploadDir };
 };
 
 const parseArgs = (cmd) => {
@@ -321,11 +433,12 @@ const getFullPotfile = () => {
 };
 
 // Rolling buffer of the most recently cracked plaintexts, surfaced to the
-// Pebble watch's RECOVERED card. Newest is pushed last; capped small.
+// Pebble watch's RECOVERED card and crack feed. Each entry records when the
+// crack landed. Newest is pushed last; capped small.
 const recentPlains = [];
 function pushRecentPlain(plain) {
     if (plain === undefined || plain === null || plain === '') return;
-    recentPlains.push(String(plain));
+    recentPlains.push({ plain: String(plain), at: Date.now() });
     while (recentPlains.length > 8) recentPlains.shift();
 }
 
@@ -448,7 +561,7 @@ app.get('/api/pebble/state', (req, res) => {
         }
         const avgHs = st.hashrateCount > 0 ? (st.hashrateSum / st.hashrateCount) : 0;
         const avgPwr = st.powerReadings > 0 ? (st.powerSum / st.powerReadings) : 0;
-        return {
+        const out = {
             id,
             name: s.name,
             type: s.type,
@@ -471,6 +584,25 @@ app.get('/api/pebble/state', (req, res) => {
             timeEstimatedSec: live.timeEstimatedSec || 0,
             lastUpdated: live.lastUpdated || 0,
         };
+        // Smart-workflow timeline pins: the watch should not pin every mask's
+        // live estimate. Instead expose two absolute finish times - the
+        // dictionary phase (phase 1, from hashcat's live estimate) and the
+        // complete mask attack (phase 3, anchored to its start + the
+        // precomputed all-masks runtime). Each is non-null only while its
+        // phase is active, so the watch pins exactly one phase at a time and
+        // retires the previous pin as the workflow advances.
+        if (s.isWorkflow) {
+            const wf = activeWorkflows[id] || {};
+            const nowMs = Date.now();
+            out.workflow = {
+                phase: wf.phase || 0,
+                dictFinishAt: (wf.phase === 1 && (live.timeEstimatedSec || 0) > 0)
+                    ? nowMs + live.timeEstimatedSec * 1000 : null,
+                maskFinishAt: (wf.phase === 3 && wf.phase3StartTime && (wf.maskEtaSec || 0) > 0)
+                    ? wf.phase3StartTime + wf.maskEtaSec * 1000 : null,
+            };
+        }
+        return out;
     });
 
     res.json({
@@ -480,7 +612,9 @@ app.get('/api/pebble/state', (req, res) => {
         globalPower: currentGlobalPower,
         maxTemp: currentMaxTemp,
         gpus: currentGpus.map(g => ({ index: g.index, temp: Math.round(g.temp || 0) })),
-        recentPlains: recentPlains.slice(-3).reverse(), // newest first, up to 3
+        recentPlains: recentPlains.slice(-3).reverse().map(c => c.plain), // newest first, up to 3
+        recentCracks: recentPlains.slice(-8).reverse()
+            .map(c => ({ plain: c.plain, at: c.at })),  // timestamped feed, newest first
         growth: getPebbleGrowth(),                      // cumulative history series
     });
 });
@@ -716,7 +850,10 @@ app.post('/api/escrow/proxy', (req, res) => {
 app.post('/api/tools/prince', (req, res) => {
     const { source, pwMin, pwMax, elemMin, elemMax, limit, casePermute, outputName, wordlistContent } = req.body;
     const princeBin = getPrincePath();
-    if (!fs.existsSync(princeBin)) return res.status(500).json({ message: 'PRINCE binary not found on server.' });
+    // A bare command name (no path separator) means "resolve via PATH" — skip the
+    // file check and let spawn surface a clear error if it isn't installed.
+    const princeIsPathCmd = !princeBin.includes('/') && !princeBin.includes('\\');
+    if (!princeIsPathCmd && !fs.existsSync(princeBin)) return res.status(500).json({ message: 'PRINCE binary not found on server.' });
 
     const jobUuid = uuid();
     const finalOutputName = outputName ?
@@ -1502,6 +1639,10 @@ app.post('/api/smart-workflow/start', (req, res) => {
     } catch (e) {}
 
     const emitPhase = (phase, message, extra = {}) => {
+        // Record the current phase so /api/pebble/state (and the watch's
+        // timeline pins) can tell the dictionary phase apart from the mask
+        // phase without inspecting hashcat's per-mask live estimates.
+        if (activeWorkflows[workflowId]) activeWorkflows[workflowId].phase = phase;
         io.emit('smart_workflow_phase', { workflowId, phase, message, ...extra });
         io.emit('log', { sessionId: workflowId, level: 'INFO', message: `[Smart Phase ${phase}/4] ${message}` });
     };
@@ -1537,6 +1678,7 @@ app.post('/api/smart-workflow/start', (req, res) => {
                         const parsed = parsePotfileLine(line);
                         if (parsed) {
                             io.emit('session_crack', { sessionId: workflowId, hash: parsed.hash, plain: parsed.plain });
+                            pushRecentPlain(parsed.plain);
                             if (activeSessions[workflowId]) activeSessions[workflowId].stats.recoveredCount++;
                             try { fs.appendFileSync(POTFILE_PATH, line.trim() + '\n'); } catch(e) {}
                         }
@@ -1690,8 +1832,17 @@ app.post('/api/smart-workflow/start', (req, res) => {
             fs.writeFileSync(maskfilePath, assets.masks.join('\n'));
             fs.writeFileSync(rulefilePath, assets.ruleContent);
             fs.writeFileSync(plaintextDictPath, assets.plaintexts.join('\n'));
-            // Write persistent all-masks file (not deleted at end — kept for user download)
+            // Write persistent mask files (not deleted at end — kept for user
+            // download from session history). Two distinct files:
+            //   _used    — the masks that fit the time budget and were run in Phase 3
+            //   _skipped — the masks that exceeded the time budget and were NOT run,
+            //              so the user can run them later
+            // _all (every extracted mask, combined) is kept for backward compatibility.
+            const usedMaskfilePath = path.join(uploadDir, `${workflowId}_used.hcmask`);
+            const skippedMaskfilePath = path.join(uploadDir, `${workflowId}_skipped.hcmask`);
             const allMaskfilePath = path.join(uploadDir, `${workflowId}_all.hcmask`);
+            if (assets.masks.length > 0) fs.writeFileSync(usedMaskfilePath, assets.masks.join('\n'));
+            if (assets.skippedMasks.length > 0) fs.writeFileSync(skippedMaskfilePath, assets.skippedMasks.join('\n'));
             if (assets.allMasks.length > 0) fs.writeFileSync(allMaskfilePath, assets.allMasks.join('\n'));
 
             let p2Detail;
@@ -1707,6 +1858,7 @@ app.post('/api/smart-workflow/start', (req, res) => {
             emitPhase(2, p2Detail, {
                 learned: assets.count,
                 masks: assets.masks.length,
+                usedMasks: assets.masks.length,
                 skippedMasks: assets.skippedMasks.length,
                 budgetExhausted: assets.budgetExhausted,
                 maskFileId: workflowId,
@@ -1714,6 +1866,11 @@ app.post('/api/smart-workflow/start', (req, res) => {
                 hashrateHps: effectiveHashrateHps,
                 hashrateSource,
             });
+            // The full mask attack's estimated runtime (all patterns combined),
+            // for the watch's single "mask attack" timeline pin.
+            if (activeWorkflows[workflowId]) {
+                activeWorkflows[workflowId].maskEtaSec = assets.estimatedPhase3Seconds || 0;
+            }
             if (activeWorkflows[workflowId]?.aborted) throw new Error('__ABORTED__');
 
             // Phase 3: Targeted mask attack
@@ -1723,6 +1880,10 @@ app.post('/api/smart-workflow/start', (req, res) => {
                     ? `Targeted mask attack — ${assets.masks.length} patterns, sort: ${phase3SortMode}, est. ~${assets.estimatedPhase3Eta}`
                     : `Targeted mask attack with ${assets.masks.length} patterns (lengths ${maskMinLen || '?'}–${maskMaxLen || '?'})`;
                 emitPhase(3, p3Desc);
+                // Anchor the mask-attack pin to the real phase-3 start so the
+                // watch shows one stable "complete mask attack" finish time
+                // rather than a pin that jumps with each per-mask estimate.
+                if (activeWorkflows[workflowId]) activeWorkflows[workflowId].phase3StartTime = Date.now();
                 const phase3Args = [
                     '-m', hashType.toString(), '-a', '3',
                     '--potfile-path', sessionPotFile, '--session', `${workflowId}_p3`,
@@ -1936,6 +2097,9 @@ app.post('/api/session/delete', (req, res) => {
         path.join(uploadDir, `${sessionId}_dynamic.hcmask`),
         path.join(uploadDir, `${sessionId}_dynamic.rule`),
         path.join(uploadDir, `${sessionId}_plaintexts.txt`),
+        path.join(uploadDir, `${sessionId}_used.hcmask`),
+        path.join(uploadDir, `${sessionId}_skipped.hcmask`),
+        path.join(uploadDir, `${sessionId}_all.hcmask`),
     ];
     workflowTempFiles.forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch(e) {} });
 
@@ -2090,9 +2254,13 @@ io.on('connection', (socket) => {
 app.get('/api/smart-workflow/masks/:workflowId', (req, res) => {
     const { workflowId } = req.params;
     if (!/^sw_\d+_[a-z0-9]+$/.test(workflowId)) return res.status(400).send('Invalid workflow ID');
-    const filePath = path.join(uploadDir, `${workflowId}_all.hcmask`);
+    // type: 'used' (masks run in Phase 3), 'skipped' (exceeded time budget, not run),
+    // or 'all' (every extracted mask — default, for backward compatibility).
+    const type = req.query.type === 'used' ? 'used' : req.query.type === 'skipped' ? 'skipped' : 'all';
+    const suffix = type === 'used' ? '_used' : type === 'skipped' ? '_skipped' : '_all';
+    const filePath = path.join(uploadDir, `${workflowId}${suffix}.hcmask`);
     if (!fs.existsSync(filePath)) return res.status(404).send('Mask file not found');
-    res.download(filePath, `masks_${workflowId}.hcmask`);
+    res.download(filePath, `masks_${workflowId}_${type}.hcmask`);
 });
 
 app.get('/pebble-config', (req, res) => {

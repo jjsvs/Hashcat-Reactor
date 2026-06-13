@@ -6,6 +6,8 @@
 #define MAX_GPU_TEMPS 8
 #define MAX_RECENT_PLAINS 3
 #define LEN_PLAIN 24    // a recovered plaintext shown on the RECOVERED card
+#define MAX_CRACKS 8    // timestamped rows in the crack-feed window
+#define LEN_CRACK_TIME 8   // "HH:MM"
 
 // Maximum string buffer sizes. Keep these tight: AppMessage payloads
 // on emery are generous but we still want the data store to fit in
@@ -25,6 +27,13 @@ typedef struct {
   char name[LEN_NAME];
   char hashrate[LEN_HASHRATE];
 } SessionRow;
+
+// One row of the crack feed: a recovered plaintext and the wall-clock time
+// it landed (formatted by the phone, "HH:MM").
+typedef struct {
+  char plain[LEN_PLAIN];
+  char time[LEN_CRACK_TIME];
+} CrackRow;
 
 // Rolling history of the hottest-GPU temperature (degrees C), one sample
 // per overview refresh. Drives the trend sparkline on the POWER card so a
@@ -66,6 +75,8 @@ typedef struct {
   int16_t  progress;     // avg keyspace progress %, 0-100; -1 = unknown
   char     recent_plains[MAX_RECENT_PLAINS][LEN_PLAIN];  // newest first
   uint8_t  recent_plains_count;
+  CrackRow cracks[MAX_CRACKS];   // timestamped crack feed, newest first
+  uint8_t  cracks_count;
   uint32_t total_power;
   uint32_t max_temp;     // hottest GPU, degrees C
   uint8_t  gpu_count;    // number of per-GPU temps parsed below

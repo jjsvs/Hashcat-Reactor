@@ -55,6 +55,7 @@ export interface PastSession {
     analysis?: InsightsData;
     phaseBreakdown?: PhaseBreakdownEntry[];
     maskFileId?: string;       // workflowId — present when smart workflow saved a mask file
+    usedMasks?: number;        // count of masks that fit the time budget and were run in Phase 3
     skippedMasks?: number;     // count of masks skipped due to time budget
     sessionId?: string;        // hashcat session id — used to rehydrate live widgets for past sessions
 }
@@ -2090,25 +2091,51 @@ const Insights: React.FC<InsightsProps> = ({
                                                                                                         </div>
                                                                                                     </div>
                                                                                                 )}
-                                                                                                {/* Mask file download */}
+                                                                                                {/* Mask file downloads — two files: masks run in Phase 3, and masks
+                                                                                                    that exceeded the time budget (saved so the user can run them later).
+                                                                                                    Older sessions only have the combined file (usedMasks undefined). */}
                                                                                                 {s.maskFileId && (
-                                                                                                    <div className="mt-3 pt-3 border-t border-indigo-900/30 flex items-center justify-between gap-2">
+                                                                                                    <div className="mt-3 pt-3 border-t border-indigo-900/30 flex flex-col gap-2">
                                                                                                         <div className="flex items-center gap-1.5">
                                                                                                             <Hash size={11} className="text-amber-400 shrink-0" />
-                                                                                                            <span className="text-[10px] text-slate-400">
-                                                                                                                {s.skippedMasks && s.skippedMasks > 0
-                                                                                                                    ? <><span className="text-amber-400 font-bold">{s.skippedMasks} masks</span> exceeded time budget — not run</>
-                                                                                                                    : 'Full mask file available for this session'}
-                                                                                                            </span>
+                                                                                                            <span className="text-[10px] text-slate-400">Extracted masks (.hcmask)</span>
                                                                                                         </div>
-                                                                                                        <a
-                                                                                                            href={`${getSocketUrl()}/api/smart-workflow/masks/${s.maskFileId}`}
-                                                                                                            download={`masks_${s.maskFileId}.hcmask`}
-                                                                                                            className="flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 transition-colors shrink-0"
-                                                                                                            title="Download all extracted masks as .hcmask — includes masks skipped due to time budget"
-                                                                                                        >
-                                                                                                            <Download size={10} /> Download Masks
-                                                                                                        </a>
+                                                                                                        <div className="flex flex-wrap items-center gap-2">
+                                                                                                            {s.usedMasks === undefined ? (
+                                                                                                                /* Legacy session — only the combined mask file exists */
+                                                                                                                <a
+                                                                                                                    href={`${getSocketUrl()}/api/smart-workflow/masks/${s.maskFileId}`}
+                                                                                                                    download={`masks_${s.maskFileId}.hcmask`}
+                                                                                                                    className="flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 transition-colors shrink-0"
+                                                                                                                    title="Download all extracted masks as .hcmask — includes masks skipped due to time budget"
+                                                                                                                >
+                                                                                                                    <Download size={10} /> Download Masks
+                                                                                                                </a>
+                                                                                                            ) : (
+                                                                                                                <>
+                                                                                                                    {s.usedMasks > 0 && (
+                                                                                                                        <a
+                                                                                                                            href={`${getSocketUrl()}/api/smart-workflow/masks/${s.maskFileId}?type=used`}
+                                                                                                                            download={`masks_${s.maskFileId}_used.hcmask`}
+                                                                                                                            className="flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 transition-colors shrink-0"
+                                                                                                                            title="Download the masks that fit the time budget and were run in Phase 3"
+                                                                                                                        >
+                                                                                                                            <Download size={10} /> Used masks ({s.usedMasks})
+                                                                                                                        </a>
+                                                                                                                    )}
+                                                                                                                    {s.skippedMasks && s.skippedMasks > 0 ? (
+                                                                                                                        <a
+                                                                                                                            href={`${getSocketUrl()}/api/smart-workflow/masks/${s.maskFileId}?type=skipped`}
+                                                                                                                            download={`masks_${s.maskFileId}_skipped.hcmask`}
+                                                                                                                            className="flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 transition-colors shrink-0"
+                                                                                                                            title="Download the masks that exceeded the time budget and were not run — run these later"
+                                                                                                                        >
+                                                                                                                            <Download size={10} /> Skipped masks ({s.skippedMasks}) — not run
+                                                                                                                        </a>
+                                                                                                                    ) : null}
+                                                                                                                </>
+                                                                                                            )}
+                                                                                                        </div>
                                                                                                     </div>
                                                                                                 )}
                                                                                             </div>

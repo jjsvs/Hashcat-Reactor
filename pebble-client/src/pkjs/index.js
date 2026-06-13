@@ -245,6 +245,16 @@ function buildOverview(state) {
     plainLines.push(truncate(String(plains[pi]), 18));
   }
 
+  // Timestamped crack feed for the watch's crack-feed window. Rows are
+  // "plain|HH:MM"; the watch splits on the LAST pipe since a plaintext may
+  // itself contain one.
+  var cracks = (state && state.recentCracks) ? state.recentCracks : [];
+  var crackLines = [];
+  for (var ci = 0; ci < cracks.length && ci < 8; ci++) {
+    crackLines.push(truncate(String(cracks[ci].plain), 20) + '|' +
+                    formatClock(cracks[ci].at));
+  }
+
   // INSIGHTS cumulative history series, straight from the bridge's session
   // history (same data the web Insights "cumulative growth" charts use):
   // recovered count and energy (Wh). Cost is derived here from energy with
@@ -304,6 +314,7 @@ function buildOverview(state) {
     'OV_TOTAL_RECOVERED':   totalRec,
     'OV_RECOVERED_TOTAL':   totalTot,
     'OV_RECENT_PLAINS':     plainLines.join('\n'),
+    'OV_CRACKS_BLOB':       crackLines.join('\n'),
     'OV_TOTAL_SUBMITTED':   totals.submitted || 0,
     'OV_PROGRESS':          progress,
     'OV_TOTAL_POWER':       Math.round(state.globalPower || 0),
@@ -337,12 +348,19 @@ function buildSessionDetail(state, index) {
   }
   var s     = sessions[index];
   var stats = s.stats || {};
+  // Recovered count for THIS session only. stats.recoveredCount is incremented
+  // once per session_crack (the same events that fill the web "recovered
+  // hashes box"), whereas stats.recovered is hashcat's "Recovered: X/Y" line —
+  // X counts every potfile match, including hashes cracked in a previous
+  // session that reused the same potfile. Using recovered as a fallback made a
+  // fresh session inherit the previous session's tally, so don't fall back.
+  var sessionRecovered = stats.recoveredCount || 0;
   // Backend tracks progress only inside live stats; derive a simple
   // percentage from recovered/total as a fallback so the bar isn't
   // permanently empty.
   var progress = 0;
   if (stats.total > 0) {
-    progress = Math.round((stats.recoveredCount || stats.recovered || 0) * 100 / stats.total);
+    progress = Math.round(sessionRecovered * 100 / stats.total);
   }
   return {
     'MSG_TYPE':       MSG_SESSION_DETAIL,
@@ -351,7 +369,7 @@ function buildSessionDetail(state, index) {
     'SD_ALGORITHM':   truncate(s.algorithmName || ('mode ' + (s.hashType || '?')), 28),
     'SD_STATUS':      String(s.status || 'RUNNING'),
     'SD_HASHRATE':    formatHashrate(s.hashrate || 0),
-    'SD_RECOVERED':   (stats.recoveredCount || stats.recovered || 0),
+    'SD_RECOVERED':   sessionRecovered,
     'SD_TOTAL':       (stats.total || 0),
     'SD_PROGRESS':    progress,
     'SD_ETR':         truncate(formatEtr(s), 14),
@@ -436,6 +454,166 @@ function pushBalance(reason) {
 }
 
 // ---------------------------------------------------------------------------
+// Timeline pins - estimated-finish ETAs
+//
+// Pins mark a session's estimated finish time (not a confirmed completion -
+// the title says "est. finish", and a future-dated pin reads as "expected
+// around here"). They are pushed to the Rebble timeline API (the 2026
+// rePebble stack still serves the classic v1 pin API; the token comes from
+// Pebble.getTimelineToken as always), each with a reminder so the watch
+// buzzes near the estimate.
+//
+// A regular session gets one pin from its live hashcat estimate. A smart
+// workflow gets at most two - one for the dictionary phase and one for the
+// complete mask attack - driven by the backend's per-phase finish times, so
+// the watch never pins every individual mask's live estimate. Pins are
+// re-PUT when a finish time drifts > ETA_DRIFT_SEC, and DELETEd once they are
+// no longer wanted (phase advanced, or the session stopped/finished early).
+// ---------------------------------------------------------------------------
+
+var TIMELINE_API   = 'https://timeline-api.rebble.io';
+var ETA_MIN_SEC    = 120;            // ignore jobs about to finish anyway
+var ETA_MAX_SEC    = 30 * 86400;     // hashcat "10 years" estimates: no pin
+var ETA_DRIFT_SEC  = 300;            // re-push when a finish time moves > 5 min
+
+var timelineToken    = null;
+var timelineDisabled = false;        // set when token fetch fails (old phone app, sandbox)
+var timelinePins     = {};           // pinId -> { etaMs }
+
+function timelineRequest(method, path, bodyObj) {
+  var xhr = new XMLHttpRequest();
+  xhr.open(method, TIMELINE_API + path, true);
+  xhr.timeout = REQUEST_TIMEOUT;
+  xhr.setRequestHeader('X-User-Token', timelineToken);
+  xhr.onload = function () {
+    if (xhr.status < 200 || xhr.status >= 300) {
+      console.log('timeline ' + method + ' ' + path + ' -> HTTP ' + xhr.status);
+    }
+  };
+  xhr.onerror = function () { console.log('timeline ' + method + ' network error'); };
+  if (bodyObj) {
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.send(JSON.stringify(bodyObj));
+  } else {
+    xhr.send();
+  }
+}
+
+// Build one timeline pin object (genericPin + a genericReminder at the same
+// time). `timeMs` is ms since epoch.
+function makePin(pinId, timeMs, title, subtitle, body, reminderTitle) {
+  var iso = new Date(timeMs).toISOString();
+  return {
+    id: pinId,
+    time: iso,
+    layout: {
+      type: 'genericPin',
+      title: truncate(title, 24),
+      subtitle: truncate(subtitle, 24),
+      tinyIcon: 'system://images/SCHEDULED_EVENT',
+      body: body
+    },
+    reminders: [{
+      time: iso,
+      layout: {
+        type: 'genericReminder',
+        tinyIcon: 'system://images/TIMELINE_CALENDAR',
+        title: truncate(reminderTitle, 24)
+      }
+    }]
+  };
+}
+
+// A finish time is pin-worthy only if it's far enough out to be useful and
+// not a bogus "10 years" estimate.
+function etaInRange(finishMs, now) {
+  var rem = (finishMs - now) / 1000;
+  return rem >= ETA_MIN_SEC && rem <= ETA_MAX_SEC;
+}
+
+// The pins we want to exist right now: pinId -> { etaMs, pin }.
+function buildDesiredPins(state, now) {
+  var sessions = (state && state.sessions) ? state.sessions : [];
+  var desired = {};
+  sessions.forEach(function (s) {
+    if (!s.id) return;
+    var name = s.name || 'Session';
+    if (s.workflow) {
+      // Smart workflow: a dictionary-phase pin and a full-mask-attack pin.
+      // The backend sets each finish time only while its phase is active, so
+      // at most one is present at a time and the other gets retired below.
+      var d = s.workflow.dictFinishAt;
+      if (d && etaInRange(d, now)) {
+        var dictId = ('hcr-dict-' + s.id).substring(0, 64);
+        desired[dictId] = { etaMs: d, pin: makePin(dictId, d, name,
+          'Dictionary · ETA',
+          'Estimated end of the dictionary phase.',
+          'Dictionary phase ETA') };
+      }
+      var m = s.workflow.maskFinishAt;
+      if (m && etaInRange(m, now)) {
+        var maskId = ('hcr-mask-' + s.id).substring(0, 64);
+        desired[maskId] = { etaMs: m, pin: makePin(maskId, m, name,
+          'Mask attack · ETA',
+          'Estimated end of the full mask attack.',
+          'Mask attack ETA') };
+      }
+    } else {
+      var fin = now + (s.timeEstimatedSec || 0) * 1000;
+      if (etaInRange(fin, now)) {
+        var id  = ('hcr-eta-' + s.id).substring(0, 64);
+        var sub = s.algorithmName ? (truncate(s.algorithmName, 16) + ' · ETA')
+                                  : 'Est. finish';
+        desired[id] = { etaMs: fin, pin: makePin(id, fin, name, sub,
+          'Estimated completion based on the current hashrate.',
+          name + ' ETA') };
+      }
+    }
+  });
+  return desired;
+}
+
+function syncTimelinePins(state) {
+  if (timelineDisabled) return;
+  if (!timelineToken) {
+    if (typeof Pebble.getTimelineToken !== 'function') {
+      timelineDisabled = true;
+      return;
+    }
+    Pebble.getTimelineToken(function (token) {
+      timelineToken = token;
+      syncTimelinePins(state);
+    }, function (e) {
+      console.log('timeline token unavailable: ' + JSON.stringify(e));
+      timelineDisabled = true;
+    });
+    return;
+  }
+
+  var now     = Date.now();
+  var desired = buildDesiredPins(state, now);
+
+  // PUT new pins and ones whose finish time drifted materially.
+  Object.keys(desired).forEach(function (pinId) {
+    var want = desired[pinId];
+    var prev = timelinePins[pinId];
+    if (prev && Math.abs(want.etaMs - prev.etaMs) < ETA_DRIFT_SEC * 1000) return;
+    timelinePins[pinId] = { etaMs: want.etaMs };
+    timelineRequest('PUT', '/v1/user/pins/' + pinId, want.pin);
+  });
+
+  // Retire pins we no longer want (phase advanced, session ended) that still
+  // point at a future time, so the timeline never promises a phantom finish.
+  Object.keys(timelinePins).forEach(function (pinId) {
+    if (desired[pinId]) return;
+    if (timelinePins[pinId].etaMs > now) {
+      timelineRequest('DELETE', '/v1/user/pins/' + pinId, null);
+    }
+    delete timelinePins[pinId];
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Polling loop
 // ---------------------------------------------------------------------------
 
@@ -448,6 +626,7 @@ function poll(reason) {
     }
     lastState = state;
     enqueue(buildOverview(state));
+    syncTimelinePins(state);
   });
   // Wallet balance comes straight from hashes.com (not the bridge's state
   // blob), so refresh it on the same cadence as the rest of the telemetry.

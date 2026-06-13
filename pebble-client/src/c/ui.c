@@ -75,11 +75,9 @@ static uint32_t icon_resource(UiIcon icon) {
     case UI_ICON_XMR:     return RESOURCE_ID_IMAGE_IC_XMR;
     case UI_ICON_WALLET:  return RESOURCE_ID_IMAGE_IC_WALLET;
     case UI_ICON_TEMP:    return RESOURCE_ID_IMAGE_IC_TEMP;
-    case UI_ICON_CLOCK:   return RESOURCE_ID_IMAGE_IC_CLOCK;
+    case UI_ICON_CHART:   return RESOURCE_ID_IMAGE_IC_CHART;
     case UI_ICON_GAUGE:   return RESOURCE_ID_IMAGE_IC_GAUGE;
     case UI_ICON_SESSION: return RESOURCE_ID_IMAGE_IC_SESSION;
-    case UI_ICON_CHIP:    return RESOURCE_ID_IMAGE_IC_CHIP;
-    case UI_ICON_MENU:    return RESOURCE_ID_IMAGE_IC_MENU;
     case UI_ICON_DOT:     return RESOURCE_ID_IMAGE_IC_DOT;
     default:              return 0;
   }

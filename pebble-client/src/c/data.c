@@ -115,6 +115,45 @@ static void parse_recent_plains(const char *blob) {
   s_overview.recent_plains_count = count;
 }
 
+// Split a newline-delimited "plain|HH:MM" feed (newest first) into the
+// overview's cracks rows for the crack-feed window. The plaintext itself may
+// contain a pipe, so the row is split on the LAST one.
+static void parse_cracks_blob(const char *blob) {
+  uint8_t count = 0;
+  if (blob) {
+    const char *p = blob;
+    while (*p && count < MAX_CRACKS) {
+      while (*p == '\n' || *p == '\r') p++;
+      if (!*p) break;
+      const char *start = p;
+      const char *sep = NULL;
+      while (*p && *p != '\n' && *p != '\r') {
+        if (*p == '|') sep = p;
+        p++;
+      }
+      const char *end = p;
+
+      CrackRow *row = &s_overview.cracks[count];
+      const char *plain_end = sep ? sep : end;
+      size_t plen = (size_t)(plain_end - start);
+      if (plen >= LEN_PLAIN) plen = LEN_PLAIN - 1;
+      memcpy(row->plain, start, plen);
+      row->plain[plen] = '\0';
+
+      if (sep) {
+        size_t tlen = (size_t)(end - (sep + 1));
+        if (tlen >= LEN_CRACK_TIME) tlen = LEN_CRACK_TIME - 1;
+        memcpy(row->time, sep + 1, tlen);
+        row->time[tlen] = '\0';
+      } else {
+        row->time[0] = '\0';
+      }
+      count++;
+    }
+  }
+  s_overview.cracks_count = count;
+}
+
 // Parse a comma-separated list of cumulative values (oldest first) into a
 // MetricHistory ring for the INSIGHTS charts. Replaces the whole series.
 static void parse_u32_csv(MetricHistory *m, const char *blob) {
@@ -178,6 +217,7 @@ void data_set_overview_field(uint32_t key, Tuple *t) {
   else if (key == MESSAGE_KEY_OV_TOTAL_RECOVERED) s_overview.total_recovered = (uint32_t)t->value->int32;
   else if (key == MESSAGE_KEY_OV_RECOVERED_TOTAL) s_overview.recovered_total = (uint32_t)t->value->int32;
   else if (key == MESSAGE_KEY_OV_RECENT_PLAINS)   parse_recent_plains(t->value->cstring);
+  else if (key == MESSAGE_KEY_OV_CRACKS_BLOB)     parse_cracks_blob(t->value->cstring);
   else if (key == MESSAGE_KEY_OV_TOTAL_SUBMITTED) s_overview.total_submitted = (uint32_t)t->value->int32;
   else if (key == MESSAGE_KEY_OV_PROGRESS)        s_overview.progress        = (int16_t)t->value->int32;
   else if (key == MESSAGE_KEY_OV_TOTAL_POWER)     s_overview.total_power     = (uint32_t)t->value->int32;

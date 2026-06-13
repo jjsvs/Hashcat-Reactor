@@ -34,6 +34,7 @@
       "OV_TOTAL_RECOVERED",
       "OV_RECOVERED_TOTAL",
       "OV_RECENT_PLAINS",
+      "OV_CRACKS_BLOB",
       "OV_TOTAL_SUBMITTED",
       "OV_PROGRESS",
       "OV_TOTAL_POWER",
@@ -112,8 +113,8 @@
         },
         {
           "type": "bitmap",
-          "name": "IMAGE_IC_CLOCK",
-          "file": "images/ic_clock.png"
+          "name": "IMAGE_IC_CHART",
+          "file": "images/ic_chart.png"
         },
         {
           "type": "bitmap",
@@ -124,16 +125,6 @@
           "type": "bitmap",
           "name": "IMAGE_IC_SESSION",
           "file": "images/ic_session.png"
-        },
-        {
-          "type": "bitmap",
-          "name": "IMAGE_IC_CHIP",
-          "file": "images/ic_chip.png"
-        },
-        {
-          "type": "bitmap",
-          "name": "IMAGE_IC_MENU",
-          "file": "images/ic_menu.png"
         },
         {
           "type": "bitmap",

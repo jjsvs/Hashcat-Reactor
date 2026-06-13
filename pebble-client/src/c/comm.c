@@ -88,6 +88,11 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
   ReactorMsgType type = (ReactorMsgType)type_t->value->int32;
   s_ever_received = true;
 
+  // Snapshot the recovered count so a fresh overview can be diffed against
+  // it: an increase means a new crack landed since the last poll.
+  uint32_t prev_recovered = data_overview()->total_recovered;
+  bool     had_overview   = data_overview()->loaded;
+
   // Iterate over every tuple and dispatch by message kind. We do this
   // in a single pass rather than calling dict_find() for each key so
   // we can keep the key list growing without N^2 cost.
@@ -118,6 +123,14 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
   switch (type) {
     case MSG_OVERVIEW:
       data_finalize_overview();
+      // Crack alert: the recovered count grew since the previous overview,
+      // so a hash fell while the user wasn't looking - tap the wrist and
+      // flash the (emery) backlight green. Suppressed for the very first
+      // overview after boot, which would otherwise "alert" on old totals.
+      if (had_overview && data_overview()->total_recovered > prev_recovered) {
+        vibes_double_pulse();
+        platform_tint_ok();
+      }
       // First successful pull after boot: cue the user with a green
       // tint so they know the bridge is reachable. Subsequent pulls
       // are silent - we don't want a strobe.

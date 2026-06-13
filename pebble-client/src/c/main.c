@@ -1,4 +1,5 @@
 #include "comm.h"
+#include "crack_feed_window.h"
 #include "data.h"
 #include "platform_features.h"
 #include "sessions_window.h"
@@ -13,8 +14,9 @@
 // flip through with Up/Down (or swipe on touch hardware). Each card owns one
 // section of the telemetry and animates into view - the card slides, the hero
 // number counts up, the progress ring/bar fills, and the page indicator dot
-// glides to the new position. SELECT refreshes; on the Sessions card SELECT
-// drills into the per-session list.
+// glides to the new position. SELECT refreshes; on the Sessions card it
+// drills into the per-session list, on the Recovered card it opens the
+// timestamped crack feed.
 //
 //   HASHRATE   - yellow     - aggregate hashrate + session count
 //   RECOVERED  - green      - recent plaintexts + recovered/total + percentage
@@ -100,7 +102,7 @@ static UiIcon card_icon(CardId c) {
     case CARD_RECOVERED: return UI_ICON_CHECK;
     case CARD_BALANCE:   return UI_ICON_WALLET;
     case CARD_POWER:     return UI_ICON_GAUGE;
-    case CARD_INSIGHTS:  return UI_ICON_CLOCK;
+    case CARD_INSIGHTS:  return UI_ICON_CHART;
     case CARD_SESSIONS:  return UI_ICON_SESSION;
     default:             return UI_ICON_DOT;
   }
@@ -159,6 +161,43 @@ static void draw_text(GContext *g, const char *text, const char *font,
                      GTextOverflowModeTrailingEllipsis, align, NULL);
 }
 
+// The LECO number fonts (the modern Pebble system face used for the big
+// figures in the system apps) only ship digit/'.'/':' glyphs, so heroes fall
+// back to a Gothic face for placeholder strings like "--".
+static bool leco_safe(const char *s) {
+  for (; *s; s++) {
+    if (!((*s >= '0' && *s <= '9') || *s == '.' || *s == ':')) return false;
+  }
+  return true;
+}
+
+// Hero figure: a big LECO number with a small bold unit tucked against its
+// baseline, the pair centered as one group. `cy` is the vertical centre.
+static void draw_hero_number(GContext *g, GRect area, const char *num,
+                             const char *unit, int16_t cy, GColor fg) {
+  const char *nf = leco_safe(num) ? FONT_KEY_LECO_32_BOLD_NUMBERS
+                                  : FONT_KEY_GOTHIC_28_BOLD;
+  GSize ns = graphics_text_layout_get_content_size(num,
+      fonts_get_system_font(nf), GRect(0, 0, area.size.w, 40),
+      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+  GSize us = GSize(0, 0);
+  if (unit) {
+    us = graphics_text_layout_get_content_size(unit,
+        fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+        GRect(0, 0, area.size.w, 24),
+        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+  }
+  int16_t gap = unit ? 5 : 0;
+  int16_t x = area.origin.x + (area.size.w - (ns.w + gap + us.w)) / 2;
+  draw_text(g, num, nf, GRect(x, cy - 19, ns.w + 2, 38), fg,
+            GTextAlignmentLeft);
+  if (unit) {
+    draw_text(g, unit, FONT_KEY_GOTHIC_18_BOLD,
+              GRect(x + ns.w + gap, cy - 2, us.w + 2, 20), fg,
+              GTextAlignmentLeft);
+  }
+}
+
 // Header: a brand-colored icon on a white badge over the section label,
 // at the top of the card. The white badge keeps the icon legible on every
 // card background.
@@ -210,7 +249,8 @@ static void draw_card_hashrate(GContext *g, GRect area, GColor fg, bool animate)
   int16_t unit_dy = show_prog ?   4 : 10;
   int16_t algo_dy = show_prog ?  46 : 38;
 
-  draw_text(g, num, FONT_KEY_BITHAM_42_BOLD,
+  draw_text(g, num,
+            leco_safe(num) ? FONT_KEY_LECO_42_NUMBERS : FONT_KEY_BITHAM_42_BOLD,
             GRect(area.origin.x, mid + num_dy, area.size.w, 48),
             fg, GTextAlignmentCenter);
   draw_text(g, unit, FONT_KEY_GOTHIC_24_BOLD,
@@ -293,13 +333,17 @@ static void draw_card_recovered(GContext *g, GRect area, GColor fg, bool animate
     y += line_h + gap;
   }
 
-  // Compact "X/Y" so even two 8-digit counts fit on one line; drop a font size
-  // for very long counts so it never clips.
+  // Compact "X/Y". Keep the big font whenever the count actually fits the card
+  // width; only drop a size if the 28px rendering would genuinely clip. (A
+  // hardcoded character cutoff shrank counts that still had room to spare.)
   char cnt[32];
   snprintf(cnt, sizeof(cnt), "%u/%u",
            (unsigned)shown_rec, (unsigned)o->recovered_total);
-  const char *cnt_font = (strlen(cnt) <= 11) ? FONT_KEY_GOTHIC_28_BOLD
-                                             : FONT_KEY_GOTHIC_18_BOLD;
+  const char *cnt_font = FONT_KEY_GOTHIC_28_BOLD;
+  GSize cnt_size = graphics_text_layout_get_content_size(cnt,
+      fonts_get_system_font(cnt_font), GRect(0, 0, bw, count_h),
+      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+  if (cnt_size.w > bw) cnt_font = FONT_KEY_GOTHIC_18_BOLD;
   draw_text(g, cnt, cnt_font, GRect(bx, y, bw, count_h), fg, GTextAlignmentCenter);
   y += count_h;
 
@@ -352,13 +396,35 @@ static void draw_card_balance(GContext *g, GRect area, GColor fg, bool animate) 
               GColorLightGray, GTextAlignmentRight);
   }
 
-  // Total dollar value pinned at the bottom.
-  draw_text(g, "TOTAL USD", FONT_KEY_GOTHIC_18,
-            GRect(area.origin.x, bottom - 42, area.size.w, 18),
+  // Total dollar value pinned at the bottom, under a hairline divider.
+  graphics_context_set_stroke_color(g, GColorDarkGray);
+  graphics_draw_line(g,
+      GPoint(area.origin.x + 16, bottom - 46),
+      GPoint(area.origin.x + area.size.w - 16, bottom - 46));
+  draw_text(g, "TOTAL USD", FONT_KEY_GOTHIC_14,
+            GRect(area.origin.x, bottom - 42, area.size.w, 16),
             GColorLightGray, GTextAlignmentCenter);
   draw_text(g, b->total_usd, FONT_KEY_GOTHIC_28_BOLD,
             GRect(area.origin.x, bottom - 26, area.size.w, 28),
             fg, GTextAlignmentCenter);
+}
+
+// A "[badge] value" read-out row, centered as one group: the text is measured
+// so badge + gap + value sit optically centered in the card whatever the
+// value's width. `cy` is the row's vertical centre.
+static void draw_badge_value_row(GContext *g, GRect area, UiIcon icon,
+                                 const char *text, int16_t cy, GColor fg) {
+  const int16_t badge_r = 12, gap = 7;
+  GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
+  GSize ts = graphics_text_layout_get_content_size(text, font,
+      GRect(0, 0, area.size.w, 30), GTextOverflowModeTrailingEllipsis,
+      GTextAlignmentLeft);
+  int16_t group_w = 2 * badge_r + gap + ts.w;
+  int16_t x = area.origin.x + (area.size.w - group_w) / 2;
+  ui_draw_icon_badge(g, icon, GPoint(x + badge_r, cy), badge_r, GColorWhite);
+  draw_text(g, text, FONT_KEY_GOTHIC_24_BOLD,
+            GRect(x + 2 * badge_r + gap, cy - 15, ts.w + 4, 30),
+            fg, GTextAlignmentLeft);
 }
 
 static void draw_card_power(GContext *g, GRect area, GColor fg, bool animate) {
@@ -369,51 +435,55 @@ static void draw_card_power(GContext *g, GRect area, GColor fg, bool animate) {
   int16_t body_top = area.origin.y + HEADER_BOTTOM;
   int16_t footer_y = area.origin.y + area.size.h - CARD_BOTTOM - 18;
   int16_t W        = area.size.w;
+  int16_t avail    = footer_y - body_top;
 
-  // Reserve a thin band just above the footer for the wattage-trend chart,
-  // but only when there are >=2 samples and the screen is tall enough to keep
-  // the band clear of the read-out above it. Short screens (e.g. basalt/chalk)
-  // simply skip it - nothing overlaps.
   const MetricHistory *hist = data_power_history();
-  const int16_t spark_h   = 18;
+  const int16_t spark_h   = 16;
   int16_t spark_bottom    = footer_y - 4;
   int16_t spark_top       = spark_bottom - spark_h;
-  bool    draw_spark      = (hist->count >= 2) && (spark_top > body_top + 76);
-  int16_t content_bottom  = draw_spark ? (spark_top - 4) : footer_y;
 
-  // Watts at the top: gauge badge + value (compact, to leave the body for
-  // the per-GPU temperatures).
-  int16_t wy = body_top + 16;
   char watts[16];
-  snprintf(watts, sizeof(watts), "%u W", (unsigned)shown);
-  ui_draw_icon_badge(g, UI_ICON_GAUGE, GPoint(cx - 50, wy), 12, GColorWhite);
-  draw_text(g, watts, FONT_KEY_GOTHIC_24_BOLD,
-            GRect(cx - 32, wy - 15, area.origin.x + W - (cx - 32) - 4, 30),
-            fg, GTextAlignmentLeft);
+  snprintf(watts, sizeof(watts), "%u", (unsigned)shown);
 
   uint8_t n = o->gpu_count;
+  int16_t content_bottom;   // where the temp content ends, for the sparkline
 
   if (n <= 1) {
-    // Single temperature, centered with a thermometer badge.
+    // The watts hero up top and a temperature read-out row beneath, spread
+    // evenly through the body so short screens stay clear of the footer. The
+    // hero carries no badge - the card header's gauge icon already says
+    // "power", so repeating it inline is noise.
+    int16_t limit = (spark_top - 4 > body_top + 76) ? (spark_top - 4) : footer_y;
+    int16_t span  = limit - body_top;
+    int16_t wy = body_top + span / 4;
+    int16_t ty = body_top + (3 * span) / 4;
+    if (ty + 15 > limit) ty = limit - 15;
+    draw_hero_number(g, area, watts, "W", wy, fg);
+
     char temp[16];
     uint32_t tv = (n == 1) ? o->gpu_temps[0] : o->max_temp;
     if (tv > 0) snprintf(temp, sizeof(temp), "%u°C", (unsigned)tv);
     else        snprintf(temp, sizeof(temp), "--°C");
-    // Match the watts read-out above: same badge radius (12) and font
-    // (GOTHIC_24_BOLD) so the two values read as a consistent pair.
-    int16_t ty = body_top + 54;
-    ui_draw_icon_badge(g, UI_ICON_TEMP, GPoint(cx - 50, ty), 12, GColorWhite);
-    draw_text(g, temp, FONT_KEY_GOTHIC_24_BOLD,
-              GRect(cx - 32, ty - 15, area.origin.x + W - (cx - 32) - 4, 30),
-              fg, GTextAlignmentLeft);
+    draw_badge_value_row(g, area, UI_ICON_TEMP, temp, ty, fg);
+    content_bottom = ty + 15;
   } else {
-    // Multiple GPUs: a grid of "Gn  ##°" cells filling the body. The degree
-    // marks make it self-evidently a temperature read-out.
-    int16_t grid_top = body_top + 38;
+    // Multiple GPUs: the watts hero up top, then a thermometer badge as the
+    // section marker (same icon-above-content pattern as the card header)
+    // over a centered grid of "Gn ##°" cells. The badge is skipped on short
+    // screens where the grid needs every row.
+    int16_t wy = body_top + 13;
+    draw_hero_number(g, area, watts, "W", wy, fg);
+
+    bool temp_badge = (avail >= 96);
+    int16_t grid_top = wy + (temp_badge ? 49 : 17);
+    if (temp_badge) {
+      ui_draw_icon_badge(g, UI_ICON_TEMP, GPoint(cx, wy + 33), 12, GColorWhite);
+    }
+
     int16_t cols     = (W >= 150) ? 2 : 1;
     int16_t cell_w   = W / cols;
     const int16_t row_h = 19;
-    int16_t grid_rows = (content_bottom - grid_top) / row_h;
+    int16_t grid_rows = (footer_y - 2 - grid_top) / row_h;
     if (grid_rows < 1) grid_rows = 1;
     int16_t max_cells = grid_rows * cols;
     bool overflow = (n > max_cells);
@@ -423,17 +493,18 @@ static void draw_card_power(GContext *g, GRect area, GColor fg, bool animate) {
     for (int16_t i = 0; i < show; i++) {
       int16_t col = i % cols;
       int16_t row = i / cols;
-      int16_t x = area.origin.x + col * cell_w;
+      int16_t ccx = area.origin.x + col * cell_w + cell_w / 2;
       int16_t y = grid_top + row * row_h;
       char lbl[8], tt[8];
       snprintf(lbl, sizeof(lbl), "G%d", (int)i);
       snprintf(tt, sizeof(tt), "%u°", (unsigned)o->gpu_temps[i]);
-      // Pale yellow reads cleanly on the card's bright cerulean background
-      // (light gray washed out) while staying subordinate to the white value.
-      draw_text(g, lbl, FONT_KEY_GOTHIC_18, GRect(x + 12, y, 34, 20),
-                GColorPastelYellow, GTextAlignmentLeft);
-      draw_text(g, tt, FONT_KEY_GOTHIC_18_BOLD, GRect(x, y, cell_w - 14, 20),
-                fg, GTextAlignmentRight);
+      // Label and value form a pair centered on the cell. Pale yellow reads
+      // cleanly on the card's bright cerulean background (light gray washed
+      // out) while staying subordinate to the white value.
+      draw_text(g, lbl, FONT_KEY_GOTHIC_18, GRect(ccx - 32, y, 28, 20),
+                GColorPastelYellow, GTextAlignmentRight);
+      draw_text(g, tt, FONT_KEY_GOTHIC_18_BOLD, GRect(ccx + 2, y, 34, 20),
+                fg, GTextAlignmentLeft);
     }
     if (overflow) {
       int16_t col = show % cols;
@@ -442,13 +513,18 @@ static void draw_card_power(GContext *g, GRect area, GColor fg, bool animate) {
       int16_t y = grid_top + row * row_h;
       char more[12];
       snprintf(more, sizeof(more), "+%d", (int)(n - show));
-      draw_text(g, more, FONT_KEY_GOTHIC_18_BOLD, GRect(x, y, cell_w - 14, 20),
-                fg, GTextAlignmentRight);
+      draw_text(g, more, FONT_KEY_GOTHIC_18_BOLD, GRect(x, y, cell_w, 20),
+                fg, GTextAlignmentCenter);
     }
+    int16_t cells = show + (overflow ? 1 : 0);
+    int16_t rows_used = (cells + cols - 1) / cols;
+    if (rows_used < 1) rows_used = 1;
+    content_bottom = grid_top + rows_used * row_h;
   }
 
-  // Wattage trend: a clean line sparkline (no fill, no animation).
-  if (draw_spark) {
+  // Wattage trend: a clean line sparkline in the band above the footer, only
+  // when it fits clear of the content (the temp grid wins on short screens).
+  if (hist->count >= 2 && spark_top >= content_bottom + 4) {
     GRect band = GRect(area.origin.x + 10, spark_top, W - 20, spark_h);
     draw_metric_line(g, band, hist, GColorWhite, GColorChromeYellow);
   }
@@ -785,15 +861,26 @@ static void indicator_update(Layer *layer, GContext *g) {
   if (s_reordering) return;
 
   GRect b = layer_get_bounds(layer);
-  int16_t cx = b.origin.x + b.size.w / 2;
   GColor fg = ui_panel_fg(card_panel(s_order[s_pos]));
 
-  if (s_pos > 0) {
-    draw_chevron(g, cx, b.origin.y + CARD_TOP, false, fg);
+  // Bottom-center page dots: one ring per card with a filled dot that glides
+  // between slots during the slide, so position and motion read at a glance.
+  const int16_t spacing = 11;
+  int16_t x0 = b.origin.x + (b.size.w - (CARD_COUNT_ - 1) * spacing) / 2;
+  int16_t y  = b.origin.y + b.size.h - 6;
+
+  graphics_context_set_stroke_color(g, fg);
+  for (int16_t i = 0; i < CARD_COUNT_; i++) {
+    graphics_draw_circle(g, GPoint(x0 + i * spacing, y), 2);
   }
-  if (s_pos + 1 < CARD_COUNT_) {
-    draw_chevron(g, cx, b.origin.y + b.size.h - CARD_TOP, true, fg);
+  int32_t fx = (int32_t)s_pos * spacing;
+  if (s_sliding) {
+    fx = (int32_t)s_prev_pos * spacing +
+         ((int32_t)(s_pos - s_prev_pos) * spacing * (int32_t)s_slide_t) /
+             ANIMATION_NORMALIZED_MAX;
   }
+  graphics_context_set_fill_color(g, fg);
+  graphics_fill_circle(g, GPoint(x0 + (int16_t)fx, y), 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -882,8 +969,8 @@ static void start_slide_anim(void) {
   animation_set_implementation(s_slide_anim, &impl);
   animation_set_handlers(s_slide_anim,
       (AnimationHandlers){ .stopped = slide_stopped }, NULL);
-  animation_set_duration(s_slide_anim, 240);
-  animation_set_curve(s_slide_anim, AnimationCurveEaseInOut);
+  animation_set_duration(s_slide_anim, 220);
+  animation_set_curve(s_slide_anim, AnimationCurveEaseOut);
   animation_schedule(s_slide_anim);
 }
 
@@ -983,6 +1070,10 @@ static void select_click(ClickRecognizerRef rec, void *ctx) {
   }
   if (s_order[s_pos] == CARD_SESSIONS && data_overview()->sessions_count_in_list > 0) {
     sessions_window_push();
+    return;
+  }
+  if (s_order[s_pos] == CARD_RECOVERED && data_overview()->cracks_count > 0) {
+    crack_feed_window_push();
     return;
   }
   comm_request_overview();
