@@ -114,6 +114,7 @@
         "deb"
       ],
       "category": "Utility",
+      "maintainer": "jjsvs <jjsvs79@gmail.com>",
       "extraResources": [
         {
           "from": "backend",
