@@ -2,6 +2,7 @@
   "name": "hashcat-reactor",
   "version": "1.0.10",
   "description": "Hashcat Reactor GUI",
+  "author": "jjsvs <jjsvs79@gmail.com>",
   "main": "electron.js",
   "scripts": {
     "dev": "vite",

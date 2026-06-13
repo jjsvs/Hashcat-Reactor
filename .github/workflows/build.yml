@@ -16,7 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          - os: windows-2022
             artifact: windows
           - os: ubuntu-latest
             artifact: linux
