@@ -2,7 +2,6 @@
   "name": "hashcat-reactor",
   "version": "1.0.10",
   "description": "Hashcat Reactor GUI",
-  "author": "jjsvs <jjsvs79@gmail.com>",
   "main": "electron.js",
   "scripts": {
     "dev": "vite",
@@ -50,45 +49,92 @@
     ],
     "files": [
       "dist/**/*",
-      "electron.js",
-      "backend/**/*"
-    ],
-    "extraResources": [
-      {
-        "from": "backend",
-        "to": "backend",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "pebble-client/config",
-        "to": "pebble-client/config",
-        "filter": [
-          "**/*"
-        ]
-      }
+      "electron.js"
     ],
     "directories": {
       "buildResources": "build"
     },
     "win": {
       "target": "nsis",
-      "icon": "build/icon.ico"
+      "icon": "build/icon.ico",
+      "extraResources": [
+        {
+          "from": "backend",
+          "to": "backend",
+          "filter": [
+            "**/*",
+            "!hashcat/hashcat.bin",
+            "!hashcat/modules/*.so",
+            "!hashcat/bridges/*.so",
+            "!john/linux/**",
+            "!john/darwin/**"
+          ]
+        },
+        {
+          "from": "pebble-client/config",
+          "to": "pebble-client/config",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ]
     },
     "mac": {
       "target": [
         "dmg",
         "zip"
       ],
-      "category": "public.app-category.utilities"
+      "category": "public.app-category.utilities",
+      "extraResources": [
+        {
+          "from": "backend",
+          "to": "backend",
+          "filter": [
+            "**/*",
+            "!hashcat/hashcat.exe",
+            "!hashcat/hashcat.bin",
+            "!hashcat/modules/*.dll",
+            "!hashcat/bridges/*.dll",
+            "!john/win32/**",
+            "!john/linux/**"
+          ]
+        },
+        {
+          "from": "pebble-client/config",
+          "to": "pebble-client/config",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ]
     },
     "linux": {
       "target": [
         "AppImage",
         "deb"
       ],
-      "category": "Utility"
+      "category": "Utility",
+      "extraResources": [
+        {
+          "from": "backend",
+          "to": "backend",
+          "filter": [
+            "**/*",
+            "!hashcat/hashcat.exe",
+            "!hashcat/modules/*.dll",
+            "!hashcat/bridges/*.dll",
+            "!john/win32/**",
+            "!john/darwin/**"
+          ]
+        },
+        {
+          "from": "pebble-client/config",
+          "to": "pebble-client/config",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ]
     }
   }
 }

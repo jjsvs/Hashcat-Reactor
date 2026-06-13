@@ -355,8 +355,13 @@ function App() {
   const [manualTargetFile, setManualTargetFile] = useState<File | null>(null);
   
   const [isStarting, setIsStarting] = useState(false);
-  const isStartingRef = useRef(isStarting); 
+  const isStartingRef = useRef(isStarting);
   const sessionRunningRef = useRef(false);
+  // Last raw status reported per session (RUNNING/COMPLETED/STOPPED/ERROR…).
+  // Updated synchronously in the session_status handler so session_finished can
+  // tell a clean completion apart from a user stop / error without waiting for
+  // the async sessions state to flush.
+  const sessionFinalStatusRef = useRef<Record<string, string>>({});
 
   const [restoreMode, setRestoreMode] = useState(false); 
   
@@ -790,6 +795,7 @@ function App() {
       });
       socket.on('session_status', (data: { sessionId: string, status: string }) => {
          const { sessionId, status: rawStatus } = data;
+         sessionFinalStatusRef.current[sessionId] = rawStatus;
          let newStatus = SessionStatus.IDLE;
          if (rawStatus === 'RUNNING') newStatus = SessionStatus.RUNNING;
          else if (rawStatus === 'PAUSED') newStatus = SessionStatus.PAUSED;
@@ -805,13 +811,23 @@ function App() {
           // smartWorkflowStateRef.current).
           const prev = smartWorkflowStateRef.current;
           if (prev?.workflowId === data.sessionId && !prev.complete) {
-              // Workflow is wrapping up without a natural P4 completion — treat
-              // any phase still 'running' or 'pending' as interrupted.
-              const phases = prev.phases.map(p =>
-                  (p.status === 'running' || p.status === 'pending')
-                      ? { ...p, status: 'aborted' as const, message: p.status === 'running' ? `${p.message || ''}${p.message ? ' · ' : ''}interrupted` : 'aborted before start' }
-                      : p
-              );
+              // Workflow is wrapping up without a natural P4 completion. Distinguish
+              // a clean backend completion (e.g. Phase 1 cracked nothing, so the
+              // adaptive phases are skipped) from a real user stop / error: the
+              // former must NOT be shown as "Aborted" just because later phases
+              // never ran. The backend's last session_status tells us which it was.
+              const finalStatus = sessionFinalStatusRef.current[data.sessionId];
+              const completedCleanly = finalStatus === 'COMPLETED';
+              const phases = prev.phases.map(p => {
+                  if (p.status !== 'running' && p.status !== 'pending') return p;
+                  if (completedCleanly) {
+                      // Ran to completion: a still-running phase is done, a phase
+                      // that never started was skipped — neither is an abort.
+                      const cleanStatus: SmartPhaseEntry['status'] = p.status === 'running' ? 'done' : 'skipped';
+                      return { ...p, status: cleanStatus };
+                  }
+                  return { ...p, status: 'aborted' as const, message: p.status === 'running' ? `${p.message || ''}${p.message ? ' · ' : ''}interrupted` : 'aborted before start' };
+              });
               const finalized: SmartWorkflowState = { ...prev, phases, complete: true };
               smartWorkflowStateRef.current = finalized;
               setSmartWorkflowState(finalized);

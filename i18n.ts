@@ -64,6 +64,7 @@ const resources = {
       "extractor_drag_drop": "Click to Upload",
       "extractor_target_format": "Target Format",
       "extractor_auto_detect": "Auto-Detect Type",
+      "extractor_wsl_note": "Some formats (e.g. Bitcoin, LUKS, Kerberos) have no native Windows tool. They run via system Python, or fall back to WSL automatically. Install Python (python.org) or run `wsl --install` if extraction fails.",
       "extractor_btn_extract": "Extract Hash",
       "extractor_output_label": "Hash Output",
       "extractor_found_count": "{{count}} found",
@@ -76,8 +77,11 @@ const resources = {
       "extractor_grp_archives": "Archives",
       "extractor_grp_docs": "Documents",
       "extractor_grp_keys": "Keys & Certs",
-      "extractor_grp_wallets": "Wallets & Managers",
-      "extractor_grp_system": "System, Net & DB",
+      "extractor_grp_wallets": "Crypto Wallets",
+      "extractor_grp_passmgr": "Password Managers",
+      "extractor_grp_disk": "Disk & Volume Encryption",
+      "extractor_grp_netauth": "Network & Authentication",
+      "extractor_grp_system": "System, Apps & DB",
 
       // Remote Access (New)
       "remote_title": "Remote Access",
@@ -451,6 +455,7 @@ const resources = {
       "extractor_desc": "从归档、文档、钱包和系统文件中提取可破解的哈希。",
       "extractor_drag_drop": "点击上传",
       "extractor_target_format": "目标格式",
+      "extractor_wsl_note": "部分格式（如 比特币、LUKS、Kerberos）没有原生 Windows 工具，将通过系统 Python 运行，或自动回退到 WSL。若提取失败，请安装 Python（python.org）或运行 `wsl --install`。",
       "extractor_auto_detect": "自动检测类型",
       "extractor_btn_extract": "提取哈希",
       "extractor_output_label": "哈希输出",
@@ -464,8 +469,11 @@ const resources = {
       "extractor_grp_archives": "归档/压缩包",
       "extractor_grp_docs": "文档",
       "extractor_grp_keys": "密钥与证书",
-      "extractor_grp_wallets": "钱包与管理器",
-      "extractor_grp_system": "系统、网络与数据库",
+      "extractor_grp_wallets": "加密货币钱包",
+      "extractor_grp_passmgr": "密码管理器",
+      "extractor_grp_disk": "磁盘与卷加密",
+      "extractor_grp_netauth": "网络与身份验证",
+      "extractor_grp_system": "系统、应用与数据库",
 
       // Remote Access 
       "remote_title": "远程访问",

@@ -2,7 +2,7 @@ const express = require('express');
 const http = require('http');
 const https = require('https');
 const { Server } = require('socket.io');
-const { spawn, exec } = require('child_process');
+const { spawn, exec, spawnSync } = require('child_process');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
@@ -101,11 +101,138 @@ const JOHN_TOOLS = {
     money:      { kind: 'python', name: 'money2john' },
     neo:        { kind: 'python', name: 'neo2john' },
     padlock:    { kind: 'python', name: 'padlock2john' },
+
+    // --- Extra modules shipped in backend/john but not wrapped as .exe.
+    // On Windows these have no native binary, so resolveJohnTool falls back to
+    // a system Python (python/py on PATH) and, failing that, to WSL
+    // (`wsl python3 …` / `wsl perl …`). See the user-facing note in the UI.
+
+    // Crypto wallets
+    bitcoin:        { kind: 'python', name: 'bitcoin2john' },
+    blockchain:     { kind: 'python', name: 'blockchain2john' },
+    multibit:       { kind: 'python', name: 'multibit2john' },
+    bitshares:      { kind: 'python', name: 'bitshares2john' },
+    tezos:          { kind: 'python', name: 'tezos2john' },
+
+    // Password managers
+    onepassword:    { kind: 'python', name: '1password2john' },
+    lastpass:       { kind: 'python', name: 'lastpass2john' },
+    bitwarden:      { kind: 'python', name: 'bitwarden2john' },
+    dashlane:       { kind: 'python', name: 'dashlane2john' },
+    enpass:         { kind: 'python', name: 'enpass2john' },
+    kwallet:        { kind: 'python', name: 'kwallet2john' },
+    pwsafe:         { kind: 'python', name: 'pwsafe2john' },
+    strip:          { kind: 'python', name: 'strip2john' },
+
+    // Disk / volume encryption
+    luks:           { kind: 'python', name: 'luks2john' },
+    truecrypt:      { kind: 'python', name: 'truecrypt2john' },
+    bestcrypt:      { kind: 'python', name: 'bestcrypt2john' },
+    diskcryptor:    { kind: 'python', name: 'diskcryptor2john' },
+    androidfde:     { kind: 'python', name: 'androidfde2john' },
+    geli:           { kind: 'python', name: 'geli2john' },
+    ecryptfs:       { kind: 'python', name: 'ecryptfs2john' },
+    encfs:          { kind: 'python', name: 'encfs2john' },
+    vmx:            { kind: 'python', name: 'vmx2john' },
+
+    // Keys / certificates / PGP
+    pem:            { kind: 'python', name: 'pem2john' },
+    openssl:        { kind: 'python', name: 'openssl2john' },
+    pgpdisk:        { kind: 'python', name: 'pgpdisk2john' },
+    pgpwde:         { kind: 'python', name: 'pgpwde2john' },
+    pgpsda:         { kind: 'python', name: 'pgpsda2john' },
+    knownhosts:     { kind: 'python', name: 'known_hosts2john' },
+
+    // Network / authentication / Kerberos
+    krb:            { kind: 'python', name: 'krb2john' },
+    kirbi:          { kind: 'python', name: 'kirbi2john' },
+    kdcdump:        { kind: 'python', name: 'kdcdump2john' },
+    htdigest:       { kind: 'python', name: 'htdigest2john' },
+    ikescan:        { kind: 'python', name: 'ikescan2john' },
+    sipdump:        { kind: 'python', name: 'sipdump2john' },
+    radius:         { kind: 'perl',   name: 'radius2john' },
+    cisco:          { kind: 'perl',   name: 'cisco2john' },
+    aix:            { kind: 'perl',   name: 'aix2john' },
+
+    // Applications / systems
+    ansible:        { kind: 'python', name: 'ansible2john' },
+    signal:         { kind: 'python', name: 'signal2john' },
+    andotp:         { kind: 'python', name: 'andotp2john' },
+    deepsound:      { kind: 'python', name: 'deepsound2john' },
+    iwork:          { kind: 'python', name: 'iwork2john' },
+    lotus:          { kind: 'python', name: 'lotus2john' },
+    mcafee:         { kind: 'python', name: 'mcafee_epo2john' },
+    ibmiscanner:    { kind: 'python', name: 'ibmiscanner2john' },
+    dpapi:          { kind: 'python', name: 'DPAPImk2john' },
+    racf:           { kind: 'native', name: 'racf2john' },
+};
+
+// --- Windows fallbacks for script-based tools without a bundled .exe ---
+// Many of JtR's *2john extractors ship only as .py/.pl scripts. On Windows we
+// have no compiled binary for them, so we run them through whatever's
+// available: a system Python interpreter first, otherwise WSL (Windows
+// Subsystem for Linux), which the user can lean on for formats like
+// bitcoin/luks/etc. that have no native Windows tool.
+
+// Convert a Windows path (D:\a\b) to a WSL path (/mnt/d/a/b) so a tool running
+// inside WSL can read files that live on the Windows filesystem.
+const toWslPath = (winPath) => {
+    const abs = path.resolve(winPath);
+    const m = /^([A-Za-z]):[\\/](.*)$/.exec(abs);
+    if (!m) return abs.replace(/\\/g, '/');
+    return `/mnt/${m[1].toLowerCase()}/${m[2].replace(/\\/g, '/')}`;
+};
+
+// Cached probe for a usable Windows Python launcher: 'python', then the 'py'
+// launcher. Returns the command string or null. Cached so we probe once.
+let _winPython; // undefined = not probed, string | null = probed
+const detectWinPython = () => {
+    if (_winPython !== undefined) return _winPython;
+    for (const cmd of ['python', 'py']) {
+        try {
+            const r = spawnSync(cmd, ['--version'], { timeout: 5000 });
+            if (!r.error && (r.status === 0 || (r.stdout && r.stdout.length) || (r.stderr && r.stderr.length))) {
+                _winPython = cmd;
+                return cmd;
+            }
+        } catch (e) { /* try next */ }
+    }
+    _winPython = null;
+    return null;
+};
+
+// Cached probe for WSL availability. Confirms `wsl` exists and a default
+// distro responds. Cached so we probe once.
+let _hasWsl;
+const detectWsl = () => {
+    if (_hasWsl !== undefined) return _hasWsl;
+    try {
+        const r = spawnSync('wsl', ['-e', 'true'], { timeout: 8000 });
+        _hasWsl = !r.error && r.status === 0;
+    } catch (e) {
+        _hasWsl = false;
+    }
+    return _hasWsl;
+};
+
+// Cached probe for a given interpreter inside WSL (e.g. 'python3', 'perl').
+const _wslInterp = {};
+const wslHasInterp = (interp) => {
+    if (interp in _wslInterp) return _wslInterp[interp];
+    if (!detectWsl()) { _wslInterp[interp] = false; return false; }
+    try {
+        const r = spawnSync('wsl', ['-e', interp, '--version'], { timeout: 8000 });
+        _wslInterp[interp] = !r.error && r.status === 0;
+    } catch (e) {
+        _wslInterp[interp] = false;
+    }
+    return _wslInterp[interp];
 };
 
 // Resolve how to invoke a john tool on the current platform.
 // Returns { command, args } where args precede the input file path, or
-// { error } describing what's missing.
+// { error } describing what's missing. When `wsl: true` is set, the caller
+// must convert the input file path with toWslPath() before appending it.
 const resolveJohnTool = (toolKey) => {
     const tool = JOHN_TOOLS[toolKey];
     if (!tool) return { error: 'Unsupported file type.' };
@@ -123,12 +250,36 @@ const resolveJohnTool = (toolKey) => {
         if (fs.existsSync(rootExe)) return { command: rootExe, args: [] };
         const subExe = path.join(johnDir, tool.name, `${tool.name}.exe`);
         if (fs.existsSync(subExe)) return { command: subExe, args: [] };
-        // Fall back to the raw script if no .exe was bundled.
-        const fb = tool.kind === 'perl' ? tryScript('perl', '.pl')
-                 : tool.kind === 'python' ? tryScript(PYTHON_BIN, '.py')
-                 : null;
-        if (fb) return fb;
-        return { error: `Binary not found for "${toolKey}".`, details: rootExe };
+
+        // No bundled .exe — fall back to the raw script. These are the
+        // "missing" extractors with no native Windows binary.
+        if (tool.kind === 'native') {
+            return { error: `Native binary "${tool.name}.exe" not found — add it to backend/john/win32.`, details: rootExe };
+        }
+        const ext = tool.kind === 'perl' ? '.pl' : '.py';
+        const script = path.join(johnDir, `${tool.name}${ext}`);
+        if (!fs.existsSync(script)) {
+            return { error: `Script "${tool.name}${ext}" not found in backend/john/win32.`, details: script };
+        }
+
+        if (tool.kind === 'python') {
+            // 1) a Python interpreter on the Windows PATH
+            const py = detectWinPython();
+            if (py) return { command: py, args: [script] };
+            // 2) WSL fallback: wsl python3 <wsl-script-path> <wsl-file-path>
+            if (wslHasInterp('python3')) {
+                return { command: 'wsl', args: ['-e', 'python3', toWslPath(script)], wsl: true };
+            }
+            return { error: `"${toolKey}" needs Python or WSL on Windows. Install Python from python.org (add to PATH) or enable WSL with python3 (\`wsl --install\`).`, details: script };
+        }
+
+        // perl tool: perl is rarely on the Windows PATH, so prefer WSL.
+        const perlOnPath = (() => { try { return !spawnSync('perl', ['--version'], { timeout: 5000 }).error; } catch (e) { return false; } })();
+        if (perlOnPath) return { command: 'perl', args: [script] };
+        if (wslHasInterp('perl')) {
+            return { command: 'wsl', args: ['-e', 'perl', toWslPath(script)], wsl: true };
+        }
+        return { error: `"${toolKey}" needs Perl or WSL on Windows. Install Strawberry Perl or enable WSL (\`wsl --install\`).`, details: script };
     }
 
     // Linux / macOS
@@ -207,7 +358,48 @@ const cleanHash = (line) => {
         { start: '$money$', end: null },
         { start: '$neo$', end: null },
         { start: '$neo2$', end: null },
-        { start: '$padlock$', end: null }
+        { start: '$padlock$', end: null },
+        // --- Extended module set ---
+        { start: '$blockchain$', end: null },
+        { start: '$multibit$', end: null },
+        { start: '$tezos$', end: null },
+        { start: '$BitShares$', end: null },
+        { start: '$lp$', end: null },                // LastPass
+        { start: '$bitwarden$', end: null },
+        { start: '$enpass$', end: null },
+        { start: '$kwallet$', end: null },
+        { start: '$pwsafe$', end: null },
+        { start: '$luks$', end: null },
+        { start: '$truecrypt$', end: null },
+        { start: 'truecrypt_', end: null },
+        { start: '$bestcrypt$', end: null },
+        { start: '$diskcryptor$', end: null },
+        { start: '$fde$', end: null },               // Android FDE
+        { start: '$geli$', end: null },
+        { start: '$ecryptfs$', end: null },
+        { start: '$encfs$', end: null },
+        { start: '$vmx$', end: null },
+        { start: '$openssl$', end: null },
+        { start: '$pem$', end: null },
+        { start: '$gpg$', end: null },
+        { start: '$pgpdisk$', end: null },
+        { start: '$pgpwde$', end: null },
+        { start: '$pgpsda$', end: null },
+        { start: '$krb5tgs$', end: null },
+        { start: '$krb5asrep$', end: null },
+        { start: '$krb5pa$', end: null },
+        { start: '$krb5$', end: null },
+        { start: '$sipdump$', end: null },
+        { start: '$ike$', end: null },
+        { start: '$ansible$', end: null },
+        { start: '$signal$', end: null },
+        { start: '$andotp$', end: null },
+        { start: '$deepsound$', end: null },
+        { start: '$iwork$', end: null },
+        { start: '$lotus5$', end: null },
+        { start: '$DPAPImk$', end: null },
+        { start: '$racf$', end: null },
+        { start: '$1password$', end: null }
     ];
 
     for (const fmt of formats) {
@@ -273,12 +465,38 @@ app.post('/api/tools/file2john', upload.single('file'), (req, res) => {
     else if (type === 'neo' || (type === 'auto' && (filename.endsWith('.wlt') || filename.endsWith('.db3')))) toolKey = 'neo';
     else if (type === 'padlock' || (type === 'auto' && filename.endsWith('.padlock'))) toolKey = 'padlock';
 
+    // Auto-detect for the extended module set (filename heuristics). Order
+    // matters: most-specific names first. Kept in sync with File2John.tsx.
+    else if (type === 'auto' && filename === 'wallet.aes.json') toolKey = 'blockchain';
+    else if (type === 'auto' && (filename === 'wallet.dat' || filename.endsWith('.dat'))) toolKey = 'bitcoin';
+    else if (type === 'auto' && (filename.endsWith('.wallet.aes') || filename === 'mbhd.wallet.aes' || filename.endsWith('.wallet'))) toolKey = 'multibit';
+    else if (type === 'auto' && filename.endsWith('.psafe3')) toolKey = 'pwsafe';
+    else if (type === 'auto' && filename.endsWith('.kwl')) toolKey = 'kwallet';
+    else if (type === 'auto' && (filename.endsWith('.opvault') || filename.endsWith('.agilekeychain'))) toolKey = 'onepassword';
+    else if (type === 'auto' && (filename === 'walletx.db' || filename.endsWith('.enpassdb'))) toolKey = 'enpass';
+    else if (type === 'auto' && (filename.endsWith('.tc') || filename.endsWith('.hc'))) toolKey = 'truecrypt';
+    else if (type === 'auto' && (filename.endsWith('.jbc') || filename.endsWith('.kbc'))) toolKey = 'bestcrypt';
+    else if (type === 'auto' && filename.endsWith('.luks')) toolKey = 'luks';
+    else if (type === 'auto' && filename.endsWith('.vmx')) toolKey = 'vmx';
+    else if (type === 'auto' && filename.endsWith('.pem')) toolKey = 'pem';
+    else if (type === 'auto' && filename.endsWith('.enc')) toolKey = 'openssl';
+    else if (type === 'auto' && filename.endsWith('.pgd')) toolKey = 'pgpdisk';
+    else if (type === 'auto' && filename.endsWith('.kirbi')) toolKey = 'kirbi';
+    else if (type === 'auto' && filename === '.htdigest') toolKey = 'htdigest';
+    else if (type === 'auto' && (filename.endsWith('.pages') || filename.endsWith('.numbers'))) toolKey = 'iwork';
+    else if (type === 'auto' && filename.endsWith('.id')) toolKey = 'lotus';
+
+    // Fallback: honour any explicitly-selected registered module by name.
+    if (!toolKey && type !== 'auto' && JOHN_TOOLS[type]) toolKey = type;
+
     if (!toolKey) return res.status(400).json({ message: 'Unsupported file type.' });
 
     const resolved = resolveJohnTool(toolKey);
     if (resolved.error) return res.status(500).json({ message: resolved.error, details: resolved.details });
 
-    const proc = spawn(resolved.command, [...resolved.args, req.file.path]);
+    // WSL-routed tools read the input through the /mnt/<drive> bridge.
+    const inputArg = resolved.wsl ? toWslPath(req.file.path) : req.file.path;
+    const proc = spawn(resolved.command, [...resolved.args, inputArg]);
     let stdout = '';
     let stderr = '';
 

@@ -27,19 +27,62 @@ const TOOLS = [
     { id: 'putty', name: 'Putty Key (.ppk)' },
     { id: 'gpg', name: 'GPG Private Key (.gpg, .asc)' },
     { id: 'pfx', name: 'PFX/P12 Certificate (.pfx)' },
+    { id: 'pem', name: 'PEM Private Key (.pem, .key)' },
+    { id: 'openssl', name: 'OpenSSL Encrypted (.enc)' },
     { id: 'keychain', name: 'macOS Keychain (.keychain)' },
     { id: 'keyring', name: 'GNOME Keyring (.keyring)' },
     { id: 'keystore', name: 'Java Keystore (.jks, .keystore)' },
+    { id: 'knownhosts', name: 'SSH known_hosts (hashed)' },
+    { id: 'pgpdisk', name: 'PGP Disk (.pgd)' },
+    { id: 'pgpwde', name: 'PGP Whole Disk Encryption' },
+    { id: 'pgpsda', name: 'PGP Self-Decrypting Archive' },
   ]},
   { categoryKey: 'extractor_grp_wallets', options: [
-    { id: 'keepass', name: 'KeePass DB (.kdbx)' },
-    { id: 'money', name: 'Microsoft Money (.mny)' },
-    { id: 'padlock', name: 'Padlock Password Manager (.padlock)' },
     { id: 'electrum', name: 'Electrum Wallet' },
     { id: 'monero', name: 'Monero Wallet (.keys)' },
     { id: 'ethereum', name: 'Ethereum Keystore (JSON)' },
     { id: 'neo', name: 'NEO Wallet (.wlt, .json)' },
+    { id: 'bitcoin', name: 'Bitcoin/Litecoin Core (wallet.dat)' },
+    { id: 'blockchain', name: 'Blockchain.info (wallet.aes.json)' },
+    { id: 'multibit', name: 'MultiBit Classic/HD Wallet' },
+    { id: 'bitshares', name: 'BitShares Wallet' },
+    { id: 'tezos', name: 'Tezos Wallet' },
+  ]},
+  { categoryKey: 'extractor_grp_passmgr', options: [
+    { id: 'keepass', name: 'KeePass DB (.kdbx)' },
+    { id: 'padlock', name: 'Padlock Password Manager (.padlock)' },
+    { id: 'money', name: 'Microsoft Money (.mny)' },
+    { id: 'onepassword', name: '1Password (.opvault, .agilekeychain)' },
+    { id: 'lastpass', name: 'LastPass Vault' },
+    { id: 'bitwarden', name: 'Bitwarden Vault (data.json)' },
+    { id: 'dashlane', name: 'Dashlane Vault' },
+    { id: 'enpass', name: 'Enpass Vault' },
+    { id: 'kwallet', name: 'KDE KWallet (.kwl)' },
+    { id: 'pwsafe', name: 'Password Safe (.psafe3)' },
+    { id: 'strip', name: 'STRIP Password Manager' },
+  ]},
+  { categoryKey: 'extractor_grp_disk', options: [
     { id: 'bitlocker', name: 'BitLocker Recovery Key' },
+    { id: 'luks', name: 'LUKS Disk Encryption' },
+    { id: 'truecrypt', name: 'TrueCrypt / VeraCrypt Volume (.tc)' },
+    { id: 'bestcrypt', name: 'BestCrypt Volume' },
+    { id: 'diskcryptor', name: 'DiskCryptor Volume' },
+    { id: 'androidfde', name: 'Android Full Disk Encryption' },
+    { id: 'geli', name: 'FreeBSD GELI' },
+    { id: 'ecryptfs', name: 'eCryptfs' },
+    { id: 'encfs', name: 'EncFS' },
+    { id: 'vmx', name: 'VMware VMX Encrypted VM' },
+  ]},
+  { categoryKey: 'extractor_grp_netauth', options: [
+    { id: 'krb', name: 'Kerberos (AS-REP / TGS-REP)' },
+    { id: 'kirbi', name: 'Kerberos Ticket (.kirbi)' },
+    { id: 'kdcdump', name: 'KDC Dump (Kerberos keys)' },
+    { id: 'htdigest', name: 'HTTP Digest (.htdigest)' },
+    { id: 'radius', name: 'RADIUS Shared Secret (pcap)' },
+    { id: 'cisco', name: 'Cisco IOS Config' },
+    { id: 'aix', name: 'AIX /etc/security/passwd' },
+    { id: 'ikescan', name: 'IKE / IPsec PSK (ike-scan)' },
+    { id: 'sipdump', name: 'SIP Authentication (sipdump)' },
   ]},
   { categoryKey: 'extractor_grp_system', options: [
     { id: 'aruba', name: 'ArubaOS Config (.cfg)' },
@@ -49,6 +92,16 @@ const TOOLS = [
     { id: 'telegram', name: 'Telegram Desktop (map/config)' },
     { id: 'android', name: 'Android Backup (.ab)' },
     { id: 'mozilla', name: 'Mozilla/Firefox (key4.db)' },
+    { id: 'ansible', name: 'Ansible Vault' },
+    { id: 'signal', name: 'Signal Desktop' },
+    { id: 'andotp', name: 'andOTP Backup' },
+    { id: 'deepsound', name: 'DeepSound Audio Stego' },
+    { id: 'iwork', name: 'Apple iWork (.pages, .key, .numbers)' },
+    { id: 'lotus', name: 'Lotus Notes ID' },
+    { id: 'dpapi', name: 'Windows DPAPI Masterkey' },
+    { id: 'mcafee', name: 'McAfee ePO' },
+    { id: 'ibmiscanner', name: 'IBM iSeries (AS/400)' },
+    { id: 'racf', name: 'z/OS RACF' },
   ]}
 ];
 
@@ -112,7 +165,37 @@ const File2John: React.FC<File2JohnProps> = ({ onSetTarget, onNavigate }) => {
       else if (name.includes('electrum') || name === 'default_wallet') setFileType('electrum');
       else if (name.endsWith('.keys')) setFileType('monero');
       else if (name.endsWith('.wlt') || name.endsWith('.db3')) setFileType('neo');
-      
+
+      // Crypto wallets
+      else if (name === 'wallet.aes.json') setFileType('blockchain');
+      else if (name === 'wallet.dat' || name.endsWith('.dat')) setFileType('bitcoin');
+      else if (name.endsWith('.wallet.aes') || name === 'mbhd.wallet.aes' || name.endsWith('.wallet')) setFileType('multibit');
+
+      // Password managers
+      else if (name.endsWith('.psafe3')) setFileType('pwsafe');
+      else if (name.endsWith('.kwl')) setFileType('kwallet');
+      else if (name.endsWith('.opvault') || name.endsWith('.agilekeychain')) setFileType('onepassword');
+      else if (name === 'walletx.db' || name.endsWith('.enpassdb')) setFileType('enpass');
+
+      // Disk / volume encryption
+      else if (name.endsWith('.tc') || name.endsWith('.hc')) setFileType('truecrypt');
+      else if (name.endsWith('.jbc') || name.endsWith('.kbc')) setFileType('bestcrypt');
+      else if (name.endsWith('.luks')) setFileType('luks');
+      else if (name.endsWith('.vmx')) setFileType('vmx');
+
+      // Keys / certs
+      else if (name.endsWith('.pem')) setFileType('pem');
+      else if (name.endsWith('.enc')) setFileType('openssl');
+      else if (name.endsWith('.pgd')) setFileType('pgpdisk');
+
+      // Network / auth
+      else if (name.endsWith('.kirbi')) setFileType('kirbi');
+      else if (name === '.htdigest') setFileType('htdigest');
+
+      // Apps
+      else if (name.endsWith('.pages') || name.endsWith('.numbers')) setFileType('iwork');
+      else if (name.endsWith('.id')) setFileType('lotus');
+
       // System & Net
       else if (name.includes('id_rsa')) setFileType('ssh');
       else if (name.endsWith('.ab')) setFileType('android');
@@ -219,8 +302,9 @@ const File2John: React.FC<File2JohnProps> = ({ onSetTarget, onNavigate }) => {
                </select>
                <Settings size={14} className="absolute right-3 top-3 text-slate-500 pointer-events-none"/>
              </div>
+             <p className="text-[11px] text-slate-600 mt-2 leading-relaxed">{t('extractor_wsl_note')}</p>
            </div>
-           
+
            <button onClick={handleExtract} disabled={!file || loading} className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg font-bold flex justify-center items-center gap-2 shadow-lg shadow-indigo-900/20">
              {loading ? <Loader2 className="animate-spin" size={16} /> : <Terminal size={16} />}
              {t('extractor_btn_extract')}
